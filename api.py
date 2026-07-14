@@ -2,8 +2,10 @@
 """API do Mapa de Disponibilidade e portal autenticado."""
 import json
 import os
+import re
 import secrets
 import tempfile
+import unicodedata
 from datetime import datetime
 
 from fastapi import Body, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
@@ -40,12 +42,12 @@ class PasswordPayload(BaseModel):
 
 class OrganizationPayload(BaseModel):
     name: str = Field(min_length=2, max_length=160)
-    slug: str = Field(min_length=3, max_length=80, pattern=r"^[a-z0-9-]+$")
+    slug: str = Field(min_length=1, max_length=80)
 
 
 class ProjectPayload(BaseModel):
     name: str = Field(min_length=2, max_length=180)
-    slug: str = Field(min_length=3, max_length=100, pattern=r"^[a-z0-9-]+$")
+    slug: str = Field(min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=4000)
 
 
@@ -91,6 +93,17 @@ def validate_email(email: str) -> str:
     if "@" not in email or email.startswith("@") or email.endswith("@"):
         raise HTTPException(status_code=422, detail="Email invalido.")
     return email
+
+
+def normalize_slug(value: str, max_length: int) -> str:
+    """Create a predictable URL-safe identifier from operator input."""
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
+    if len(slug) < 3:
+        raise HTTPException(status_code=422, detail="Use pelo menos 3 letras ou numeros no identificador.")
+    if len(slug) > max_length:
+        raise HTTPException(status_code=422, detail=f"O identificador pode ter no maximo {max_length} caracteres.")
+    return slug
 
 
 def organization_membership(db: DbSession, user_id: str, organization_id: str) -> Membership | None:
@@ -208,9 +221,10 @@ def list_organizations(user: User = Depends(current_user), db: DbSession = Depen
 
 @app.post("/api/organizations", status_code=201)
 def create_organization(payload: OrganizationPayload, user: User = Depends(require_platform_admin), db: DbSession = Depends(get_db)):
-    if db.query(Organization).filter(Organization.slug == payload.slug).first():
+    slug = normalize_slug(payload.slug, 80)
+    if db.query(Organization).filter(Organization.slug == slug).first():
         raise HTTPException(status_code=409, detail="Esse identificador de cliente ja esta em uso.")
-    org = Organization(name=payload.name.strip(), slug=payload.slug)
+    org = Organization(name=payload.name.strip(), slug=slug)
     db.add(org)
     db.flush()
     audit(db, "organization_created", "organization", actor=user, target_id=org.id, organization_id=org.id)
@@ -255,9 +269,10 @@ def create_project(organization_id: str, payload: ProjectPayload, user: User = D
         raise HTTPException(status_code=404, detail="Cliente nao encontrado.")
     if not can_manage_organization(db, user, organization_id):
         raise HTTPException(status_code=403, detail="Sem permissao para criar projeto para este cliente.")
-    if db.query(Project).filter(Project.slug == payload.slug).first():
+    slug = normalize_slug(payload.slug, 100)
+    if db.query(Project).filter(Project.slug == slug).first():
         raise HTTPException(status_code=409, detail="Esse identificador de projeto ja esta em uso.")
-    project = Project(organization_id=organization_id, name=payload.name.strip(), slug=payload.slug, description=payload.description)
+    project = Project(organization_id=organization_id, name=payload.name.strip(), slug=slug, description=payload.description)
     db.add(project)
     db.flush()
     audit(db, "project_created", "project", actor=user, target_id=project.id, organization_id=organization_id)
