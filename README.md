@@ -1,6 +1,6 @@
 ---
 title: Mapa de Disponibilidade
-emoji: map
+emoji: 🗺️
 colorFrom: green
 colorTo: blue
 sdk: gradio
