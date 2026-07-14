@@ -51,6 +51,17 @@ class ProjectPayload(BaseModel):
     description: str | None = Field(default=None, max_length=4000)
 
 
+class ProjectUpdatePayload(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=180)
+    description: str | None = Field(default=None, max_length=4000)
+    status: str | None = Field(default=None, pattern=r"^(draft|review|published|paused|archived)$")
+    access_mode: str | None = Field(default=None, pattern=r"^(private|link|public)$")
+
+
+class ProfilePayload(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+
+
 class MemberPayload(BaseModel):
     email: str = Field(min_length=5, max_length=320)
     role: str = Field(default="client_member", pattern=r"^(client_admin|client_member)$")
@@ -84,6 +95,7 @@ def project_data(project: Project) -> dict:
         "status": project.status,
         "access_mode": project.access_mode,
         "description": project.description,
+        "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
     }
 
@@ -261,6 +273,58 @@ def list_projects(organization_id: str | None = None, user: User = Depends(curre
             raise HTTPException(status_code=403, detail="Sem permissao para este cliente.")
         query = query.filter(Project.organization_id == organization_id)
     return {"projects": [project_data(project) for project in query.order_by(Project.updated_at.desc()).all()]}
+
+
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: str, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto nao encontrado.")
+    if not can_manage_organization(db, user, project.organization_id) and user.platform_role not in {"platform_admin", "operator"}:
+        raise HTTPException(status_code=403, detail="Sem permissao para este projeto.")
+    org = db.get(Organization, project.organization_id)
+    return {"project": project_data(project), "organization": organization_data(org)}
+
+
+@app.patch("/api/projects/{project_id}")
+def update_project(project_id: str, payload: ProjectUpdatePayload, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto nao encontrado.")
+    if not can_manage_organization(db, user, project.organization_id):
+        raise HTTPException(status_code=403, detail="Sem permissao para alterar este projeto.")
+    changes = payload.model_dump(exclude_unset=True)
+    if "name" in changes:
+        project.name = changes["name"].strip()
+    if "description" in changes:
+        project.description = changes["description"]
+    if "status" in changes:
+        project.status = changes["status"]
+    if "access_mode" in changes:
+        project.access_mode = changes["access_mode"]
+    audit(db, "project_updated", "project", actor=user, target_id=project.id, organization_id=project.organization_id, details=json.dumps(changes))
+    db.commit()
+    db.refresh(project)
+    return {"project": project_data(project)}
+
+
+@app.get("/api/activity")
+def list_activity(limit: int = Query(50, ge=1, le=100), user: User = Depends(require_platform_admin), db: DbSession = Depends(get_db)):
+    rows = db.query(AuditEvent, User).outerjoin(User, AuditEvent.actor_user_id == User.id).order_by(AuditEvent.created_at.desc()).limit(limit).all()
+    return {"events": [
+        {"id": event.id, "action": event.action, "target_type": event.target_type, "target_id": event.target_id,
+         "organization_id": event.organization_id, "details": event.details, "created_at": event.created_at.isoformat(),
+         "actor_name": actor.name if actor else "Sistema"}
+        for event, actor in rows
+    ]}
+
+
+@app.patch("/api/profile")
+def update_profile(payload: ProfilePayload, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    user.name = payload.name.strip()
+    audit(db, "profile_updated", "user", actor=user, target_id=user.id)
+    db.commit()
+    return {"user": user_data(user)}
 
 
 @app.post("/api/organizations/{organization_id}/projects", status_code=201)
