@@ -2,9 +2,21 @@
 
 import os
 
+import gradio as gr
+import spaces
 import uvicorn
 
-from api import app
+from api import app as api_app
+
+
+@spaces.GPU
+def health_probe():
+    """Satisfy ZeroGPU startup detection without moving PDF work to the GPU."""
+    return "ok"
+
+
+demo = gr.Blocks()
+app = gr.mount_gradio_app(api_app, demo, path="/")
 
 
 if __name__ == "__main__":
