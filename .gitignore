@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local runtime output
+output/
+tmp/
+test-results/
+.playwright-cli/
+
+# Generated maps and private source files
+*.pdf
+*.geojson
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.html
+!index.html
+!README.md
+!README_HF.md
+
+# Local logs and secrets
+*.log
+.env
+.env.*
+!.env.example

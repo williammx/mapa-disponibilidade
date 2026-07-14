@@ -1,0 +1,10 @@
+# Motor de conversao (CLI)
+pymupdf>=1.24
+shapely>=2.0
+pillow>=10.0
+numpy>=1.26
+opencv-python-headless>=4.10
+# API (opcional, so para rodar api.py)
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
