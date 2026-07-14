@@ -16,6 +16,12 @@ app = FastAPI(title="Mapa de Disponibilidade")
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+@app.get("/health")
+def health():
+    """Endpoint leve para monitoramento do container e da VPS."""
+    return {"status": "ok"}
+
+
 @app.get("/")
 def home():
     return FileResponse(os.path.join(HERE, "index.html"))

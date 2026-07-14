@@ -1,0 +1,13 @@
+.git
+.playwright-cli
+__pycache__
+output
+test-results
+tmp
+*.pyc
+*.pdf
+*.png
+*.geojson
+*.html
+!index.html
+!README.md

@@ -1,0 +1,9 @@
+services:
+  mapa-disponibilidade:
+    build: .
+    container_name: mapa-disponibilidade
+    restart: unless-stopped
+    environment:
+      PORT: "7860"
+    ports:
+      - "127.0.0.1:8000:7860"

@@ -1,25 +1,28 @@
----
-title: Mapa de Disponibilidade
-emoji: 🗺️
-colorFrom: green
-colorTo: blue
-sdk: gradio
-sdk_version: 5.49.1
-app_file: app.py
----
-
 # Mapa de Disponibilidade
 
-MVP que converte PDFs vetoriais de loteamentos em mapas interativos de disponibilidade.
+MVP que converte PDFs vetoriais de loteamentos em mapas interativos de disponibilidade. Os lotes podem receber status, cor, opacidade, etiquetas e ajustes manuais.
 
-## Local
+## Rotas
+
+- `GET /`: pagina de envio do PDF.
+- `POST /converter`: recebe um PDF e devolve o mapa HTML.
+- `POST /render`: reconstroi o mapa apos as edicoes.
+- `GET /health`: verificacao leve para a VPS.
+
+## Desenvolvimento local
 
 ```powershell
-uvicorn api:app --port 8000
+python -m pip install -r requirements.txt
+python -m uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-O backend oferece as rotas `/converter` e `/render`. O arquivo `app.py` inicia o FastAPI no ambiente do Hugging Face Spaces.
+## VPS
 
-## Publicacao
+O deploy de producao usa Docker Compose e Nginx. A aplicacao fica em `127.0.0.1:8000`; o Nginx recebe o trafego publico e encaminha as requisicoes.
 
-O codigo principal esta no GitHub e o backend e publicado em um Space Docker/Gradio compativel com o plano gratuito.
+```bash
+docker compose up -d --build
+curl http://127.0.0.1:8000/health
+```
+
+O plano de evolucao esta em [ROADMAP.md](ROADMAP.md).

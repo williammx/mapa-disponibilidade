@@ -4,9 +4,7 @@ shapely>=2.0
 pillow>=10.0
 numpy>=1.26
 opencv-python-headless>=4.10
-# API (opcional, so para rodar api.py)
+# API
 fastapi>=0.110
 uvicorn>=0.29
 python-multipart>=0.0.9
-gradio>=5.0
-spaces>=0.30
