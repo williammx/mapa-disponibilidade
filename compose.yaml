@@ -1,9 +1,35 @@
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: mapa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mapa}
+      POSTGRES_USER: ${POSTGRES_USER:-mapa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mapa-local}
+    volumes:
+      - mapa_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   mapa-disponibilidade:
     build: .
     container_name: mapa-disponibilidade
     restart: unless-stopped
     environment:
       PORT: "7860"
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mapa:mapa-local@db:5432/mapa}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_DAYS: ${SESSION_DAYS:-14}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8000:7860"
+
+volumes:
+  mapa_postgres_data:

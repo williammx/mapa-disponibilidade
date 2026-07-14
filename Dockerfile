@@ -14,7 +14,7 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY api.py pdf_to_map.py index.html ./
+COPY api.py auth.py database.py models.py pdf_to_map.py index.html login.html portal.html ./
 
 EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

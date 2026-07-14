@@ -10,4 +10,6 @@ tmp
 *.geojson
 *.html
 !index.html
+!login.html
+!portal.html
 !README.md

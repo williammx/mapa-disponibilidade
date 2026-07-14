@@ -8,3 +8,6 @@ opencv-python-headless>=4.10
 fastapi>=0.110
 uvicorn>=0.29
 python-multipart>=0.0.9
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+pwdlib[argon2]>=0.2
