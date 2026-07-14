@@ -25,4 +25,4 @@ docker compose up -d --build
 curl http://127.0.0.1:8000/health
 ```
 
-O plano de evolucao esta em [ROADMAP.md](ROADMAP.md).
+O plano de evolucao esta em [ROADMAP.md](ROADMAP.md). A visao de produto, perfis e regras de entrega esta em [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md).
