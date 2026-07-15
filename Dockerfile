@@ -1,3 +1,11 @@
+FROM node:22-slim AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -14,9 +22,12 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY api.py auth.py database.py models.py pdf_to_map.py index.html login.html portal.html ./
+COPY api.py auth.py database.py models.py pdf_to_map.py index.html login.html portal.html alembic.ini ./
+COPY app_v1 ./app_v1
+COPY alembic ./alembic
+COPY --from=frontend-build /frontend/dist ./frontend/dist
 
 EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/health', timeout=3)"
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn api:app --host 0.0.0.0 --port ${PORT}"]

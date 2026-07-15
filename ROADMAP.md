@@ -9,7 +9,11 @@ Transformar o conversor de PDFs em uma plataforma B2B para imobiliarias. A equip
 - Conversor de PDF vetorial para mapa interativo.
 - Editor manual de lotes, cores, opacidade, rotulos e status.
 - Publicacao inicial em VPS com Docker e Nginx.
-- Ainda sem banco de dados, login, projetos persistentes ou portal do cliente.
+- Landing page em React/Vite no dominio raiz.
+- Portal React em migracao com rotas internas de clientes, projetos, workspace, publicacao e mapa publico.
+- Banco, login, organizacoes, projetos, versoes e links ja existem no backend atual.
+- Nova API `/api/v1` criada para a reconstrucao operacional: arquivos, jobs, lotes, versoes, links, propostas e auditoria.
+- Redis/RQ, Alembic, storage privado e scripts de backup foram preparados para a VPS.
 
 ## Fase 0 - Base de produto e seguranca
 
