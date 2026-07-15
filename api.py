@@ -189,9 +189,9 @@ PORTAL_DELIVERY_CONTROLS = """
     policy.style.marginTop = '18px';
     policy.innerHTML = '<strong>Entrega ao cliente</strong>' +
       '<label class="field" style="margin-top:12px">Visibilidade<select id="deliveryAccess"><option value="private">Privado - link controlado</option><option value="link">Por link - sem senha</option><option value="public">Publico - URL publica</option></select></label>' +
-      '<label class="field" style="display:flex;grid-template-columns:auto 1fr;align-items:center;gap:10px;margin-top:12px"><input id="clientCanEdit" type="checkbox"><span>Permitir edicao pelo cliente</span></label>' +
+      '<label class="field" style="display:flex;grid-template-columns:auto 1fr;align-items:center;gap:10px;margin-top:12px"><input id="clientCanEdit" type="checkbox" style="width:auto;min-height:0"><span>Permitir edicao pelo cliente</span></label>' +
       '<p style="margin:10px 0 0;font-size:12px">Desligado por padrao: o cliente abre somente o mapa, sem lista, ferramentas ou edicao.</p>' +
-      '<div class="actions" style="margin-top:13px"><button class="primary">Salvar acesso</button></div><div class="error" id="deliveryError"></div>';
+      '<div class="actions" style="margin-top:13px"><button class="primary">Salvar acesso</button><a href="/projects/' + project.id + '/editor" target="_blank"><button type="button">Abrir editor</button></a></div><div class="error" id="deliveryError"></div>';
     detail.prepend(policy);
     document.getElementById('deliveryAccess').value = project.access_mode;
     document.getElementById('clientCanEdit').checked = !!project.client_can_edit;
@@ -217,6 +217,26 @@ PORTAL_DELIVERY_CONTROLS = """
 def portal_page():
     with open(os.path.join(HERE, "portal.html"), "r", encoding="utf-8") as portal_file:
         return HTMLResponse(portal_file.read() + PORTAL_DELIVERY_CONTROLS)
+
+
+def project_editor_response(project: Project, version: ProjectVersion) -> HTMLResponse:
+    if not os.path.isfile(version.map_html_path):
+        raise HTTPException(status_code=404, detail="Arquivo do mapa nao encontrado.")
+    with open(version.map_html_path, "r", encoding="utf-8") as map_file:
+        html = map_file.read()
+    controls = f"""<style>#project-save-bar{{position:fixed;z-index:30;top:12px;right:64px;display:flex;gap:8px;padding:7px;border:1px solid #3a4651;border-radius:8px;background:#161c22;box-shadow:0 12px 28px rgba(0,0,0,.28)}}#project-save-bar button,#project-save-bar a{{border:1px solid #43515d;border-radius:6px;background:#212b33;color:#eef5f1;padding:8px 10px;font:600 12px system-ui;text-decoration:none;cursor:pointer}}#project-save-bar button{{border-color:#36d889;background:#36d889;color:#06281a}}</style><div id=\"project-save-bar\"><a href=\"/app\">Voltar ao projeto</a><button id=\"save-project-map\">Salvar alteracoes</button></div><script>document.getElementById('save-project-map').onclick=async function(){{var button=this;button.disabled=true;button.textContent='Salvando...';try{{var payload=window.getMapaPayload();var rendered=await fetch('/render',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});if(!rendered.ok)throw new Error('Nao foi possivel preparar o mapa.');var saved=await fetch('/api/projects/{project.id}/versions/html',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:await rendered.text(),lot_count:Array.isArray(payload.lots)?payload.lots.length:0}})}});if(!saved.ok)throw new Error('Nao foi possivel salvar.');button.textContent='Alteracoes salvas';}}catch(error){{button.disabled=false;button.textContent='Salvar alteracoes';alert(error.message);}}}};</script>"""
+    return HTMLResponse(html.replace("</body>", controls + "</body>", 1))
+
+
+@app.get("/projects/{project_id}/editor")
+def project_editor(project_id: str, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project or not can_manage_organization(db, user, project.organization_id):
+        raise HTTPException(status_code=404, detail="Projeto nao encontrado.")
+    version = latest_version(db, project.id)
+    if not version:
+        raise HTTPException(status_code=409, detail="Salve ou gere um mapa antes de abrir o editor.")
+    return project_editor_response(project, version)
 
 
 @app.post("/api/auth/setup")
