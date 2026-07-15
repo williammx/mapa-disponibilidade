@@ -68,6 +68,11 @@ class ShareLinkPayload(BaseModel):
     password: str | None = Field(default=None, max_length=128)
 
 
+class HtmlVersionPayload(BaseModel):
+    html: str = Field(min_length=100, max_length=80_000_000)
+    lot_count: int = Field(default=0, ge=0)
+
+
 class MemberPayload(BaseModel):
     email: str = Field(min_length=5, max_length=320)
     role: str = Field(default="client_member", pattern=r"^(client_admin|client_member)$")
@@ -358,6 +363,30 @@ async def generate_project_map(project_id: str, arquivo: UploadFile = File(...),
     audit(db, "project_map_generated", "project_version", actor=user, target_id=version.id, organization_id=project.organization_id)
     db.commit()
     return {"version": {"id": version.id, "lot_count": version.lot_count, "quality": version.quality}}
+
+
+@app.post("/api/projects/{project_id}/versions/html", status_code=201)
+def save_editor_version(project_id: str, payload: HtmlVersionPayload, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project or not can_manage_organization(db, user, project.organization_id):
+        raise HTTPException(status_code=404, detail="Projeto nao encontrado.")
+    version = ProjectVersion(
+        project_id=project.id,
+        source_pdf_path=None,
+        map_html_path="",
+        lot_count=payload.lot_count,
+        quality="editor",
+    )
+    db.add(version)
+    db.flush()
+    version_dir = os.path.join(DATA_DIR, "projects", project.id, version.id)
+    os.makedirs(version_dir, exist_ok=True)
+    version.map_html_path = os.path.join(version_dir, "map.html")
+    with open(version.map_html_path, "w", encoding="utf-8") as fh:
+        fh.write(payload.html)
+    audit(db, "project_editor_saved", "project_version", actor=user, target_id=version.id, organization_id=project.organization_id)
+    db.commit()
+    return {"version": {"id": version.id}}
 
 
 @app.post("/api/projects/{project_id}/publish")
