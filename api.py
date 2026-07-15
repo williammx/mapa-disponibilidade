@@ -4,23 +4,25 @@ import json
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import unicodedata
 from datetime import datetime
 
-from fastapi import Body, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session as DbSession
 
 import pdf_to_map
-from auth import audit, clear_session, current_user, normalize_email, password_hash, require_platform_admin, set_session
+from auth import audit, clear_session, current_user, hash_token, normalize_email, password_hash, require_platform_admin, set_session
 from database import Base, engine, get_db
-from models import Membership, Organization, Project, Session, User, utcnow
+from models import Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
 
 app = FastAPI(title="Mapa de Disponibilidade")
 HERE = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 
 
 class SetupPayload(BaseModel):
@@ -62,6 +64,10 @@ class ProfilePayload(BaseModel):
     name: str = Field(min_length=2, max_length=160)
 
 
+class ShareLinkPayload(BaseModel):
+    password: str | None = Field(default=None, max_length=128)
+
+
 class MemberPayload(BaseModel):
     email: str = Field(min_length=5, max_length=320)
     role: str = Field(default="client_member", pattern=r"^(client_admin|client_member)$")
@@ -98,6 +104,13 @@ def project_data(project: Project) -> dict:
         "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
     }
+
+
+def latest_version(db: DbSession, project_id: str, published_only: bool = False) -> ProjectVersion | None:
+    query = db.query(ProjectVersion).filter(ProjectVersion.project_id == project_id)
+    if published_only:
+        query = query.filter(ProjectVersion.is_published.is_(True))
+    return query.order_by(ProjectVersion.created_at.desc()).first()
 
 
 def validate_email(email: str) -> str:
@@ -283,7 +296,11 @@ def get_project(project_id: str, user: User = Depends(current_user), db: DbSessi
     if not can_manage_organization(db, user, project.organization_id) and user.platform_role not in {"platform_admin", "operator"}:
         raise HTTPException(status_code=403, detail="Sem permissao para este projeto.")
     org = db.get(Organization, project.organization_id)
-    return {"project": project_data(project), "organization": organization_data(org)}
+    version = latest_version(db, project.id)
+    links = db.query(ShareLink).filter(ShareLink.project_id == project.id, ShareLink.active.is_(True)).order_by(ShareLink.created_at.desc()).all()
+    return {"project": project_data(project), "organization": organization_data(org),
+            "version": {"id": version.id, "lot_count": version.lot_count, "quality": version.quality, "is_published": version.is_published} if version else None,
+            "share_links": [{"id": link.id, "has_password": bool(link.password_hash), "url": f"/s/{link.token}" if link.token else f"/p/{project.slug}"} for link in links]}
 
 
 @app.patch("/api/projects/{project_id}")
@@ -306,6 +323,115 @@ def update_project(project_id: str, payload: ProjectUpdatePayload, user: User = 
     db.commit()
     db.refresh(project)
     return {"project": project_data(project)}
+
+
+@app.post("/api/projects/{project_id}/generate", status_code=201)
+async def generate_project_map(project_id: str, arquivo: UploadFile = File(...), quality: str = Query("balanced"),
+                               user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto nao encontrado.")
+    if not can_manage_organization(db, user, project.organization_id):
+        raise HTTPException(status_code=403, detail="Sem permissao para gerar este projeto.")
+    if not (arquivo.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="Envie um arquivo PDF.")
+    project_dir = os.path.join(DATA_DIR, "projects", project.id)
+    os.makedirs(project_dir, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = os.path.join(tmp, "source.pdf")
+        out_path = os.path.join(tmp, "map.html")
+        with open(pdf_path, "wb") as fh:
+            shutil.copyfileobj(arquivo.file, fh)
+        try:
+            info = pdf_to_map.convert(pdf_path, out_path, title=project.name, quality=quality)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Nao consegui processar o PDF ({type(exc).__name__}).") from exc
+        version = ProjectVersion(project_id=project.id, source_pdf_path="", map_html_path="", lot_count=int(info.get("lotes", 0)), quality=quality)
+        db.add(version)
+        db.flush()
+        version_dir = os.path.join(project_dir, version.id)
+        os.makedirs(version_dir, exist_ok=True)
+        version.source_pdf_path = os.path.join(version_dir, "source.pdf")
+        version.map_html_path = os.path.join(version_dir, "map.html")
+        shutil.copy2(pdf_path, version.source_pdf_path)
+        shutil.copy2(out_path, version.map_html_path)
+    audit(db, "project_map_generated", "project_version", actor=user, target_id=version.id, organization_id=project.organization_id)
+    db.commit()
+    return {"version": {"id": version.id, "lot_count": version.lot_count, "quality": version.quality}}
+
+
+@app.post("/api/projects/{project_id}/publish")
+def publish_project(project_id: str, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project or not can_manage_organization(db, user, project.organization_id):
+        raise HTTPException(status_code=404, detail="Projeto nao encontrado.")
+    version = latest_version(db, project.id)
+    if not version:
+        raise HTTPException(status_code=409, detail="Gere uma versao do mapa antes de publicar.")
+    db.query(ProjectVersion).filter(ProjectVersion.project_id == project.id).update({"is_published": False})
+    version.is_published = True
+    project.status = "published"
+    audit(db, "project_published", "project_version", actor=user, target_id=version.id, organization_id=project.organization_id)
+    db.commit()
+    return {"url": f"/p/{project.slug}", "version_id": version.id}
+
+
+@app.post("/api/projects/{project_id}/share", status_code=201)
+def create_share_link(project_id: str, payload: ShareLinkPayload, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project or not can_manage_organization(db, user, project.organization_id):
+        raise HTTPException(status_code=404, detail="Projeto nao encontrado.")
+    if not latest_version(db, project.id, published_only=True):
+        raise HTTPException(status_code=409, detail="Publique uma versao antes de compartilhar.")
+    token = secrets.token_urlsafe(18)
+    link = ShareLink(project_id=project.id, token=token, token_hash=hash_token(token), password_hash=password_hash.hash(payload.password) if payload.password else None)
+    db.add(link)
+    audit(db, "share_link_created", "share_link", actor=user, target_id=link.id, organization_id=project.organization_id)
+    db.commit()
+    return {"url": f"/s/{token}", "has_password": bool(payload.password)}
+
+
+def shared_map_response(project: Project, version: ProjectVersion):
+    if not os.path.isfile(version.map_html_path):
+        raise HTTPException(status_code=404, detail="Arquivo do mapa nao encontrado.")
+    return FileResponse(version.map_html_path, media_type="text/html")
+
+
+@app.get("/p/{slug}")
+def public_project_map(slug: str, db: DbSession = Depends(get_db)):
+    project = db.query(Project).filter(Project.slug == slug, Project.status == "published", Project.access_mode == "public").first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Mapa nao esta publico.")
+    version = latest_version(db, project.id, published_only=True)
+    if not version:
+        raise HTTPException(status_code=404, detail="Mapa nao encontrado.")
+    return shared_map_response(project, version)
+
+
+@app.get("/s/{token}")
+def shared_project_map(token: str, db: DbSession = Depends(get_db)):
+    link = db.query(ShareLink).filter(ShareLink.token == token, ShareLink.active.is_(True)).first()
+    if not link:
+        raise HTTPException(status_code=404, detail="Link nao encontrado.")
+    project = db.get(Project, link.project_id)
+    version = latest_version(db, project.id, published_only=True)
+    if not version:
+        raise HTTPException(status_code=404, detail="Mapa nao publicado.")
+    if link.password_hash:
+        return HTMLResponse('<form method="post" style="font:16px system-ui;max-width:360px;margin:15vh auto"><h1>Acesso protegido</h1><input name="password" type="password" placeholder="Senha" required style="width:100%;padding:12px"><button style="margin-top:12px;padding:12px">Abrir mapa</button></form>')
+    return shared_map_response(project, version)
+
+
+@app.post("/s/{token}")
+def unlock_shared_project(token: str, password: str = Form(...), db: DbSession = Depends(get_db)):
+    link = db.query(ShareLink).filter(ShareLink.token == token, ShareLink.active.is_(True)).first()
+    if not link or not link.password_hash or not password_hash.verify(password, link.password_hash):
+        raise HTTPException(status_code=403, detail="Senha invalida.")
+    project = db.get(Project, link.project_id)
+    version = latest_version(db, project.id, published_only=True)
+    if not version:
+        raise HTTPException(status_code=404, detail="Mapa nao publicado.")
+    return shared_map_response(project, version)
 
 
 @app.get("/api/activity")

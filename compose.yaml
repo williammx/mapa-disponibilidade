@@ -30,6 +30,9 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:7860"
+    volumes:
+      - mapa_project_data:/data
 
 volumes:
   mapa_postgres_data:
+  mapa_project_data:

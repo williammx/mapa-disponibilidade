@@ -64,6 +64,32 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class ProjectVersion(Base):
+    __tablename__ = "project_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_pdf_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    map_html_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    lot_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    quality: Mapped[str] = mapped_column(String(32), nullable=False, default="balanced")
+    is_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class ShareLink(Base):
+    __tablename__ = "share_links"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    token: Mapped[str | None] = mapped_column(String(96), nullable=True, unique=True, index=True)
+    token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
 class Session(Base):
     __tablename__ = "sessions"
 
