@@ -49,6 +49,8 @@ services:
     build: .
     container_name: mapa-worker
     restart: unless-stopped
+    healthcheck:
+      disable: true
     command: ["sh", "-c", "alembic upgrade head && rq worker pdf-processing --url ${REDIS_URL:-redis://redis:6379/0}"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mapa:mapa-local@db:5432/mapa}
