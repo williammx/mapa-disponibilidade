@@ -12,7 +12,7 @@ from datetime import datetime
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session as DbSession
 
 import pdf_to_map
@@ -58,6 +58,7 @@ class ProjectUpdatePayload(BaseModel):
     description: str | None = Field(default=None, max_length=4000)
     status: str | None = Field(default=None, pattern=r"^(draft|review|published|paused|archived)$")
     access_mode: str | None = Field(default=None, pattern=r"^(private|link|public)$")
+    client_can_edit: bool | None = None
 
 
 class ProfilePayload(BaseModel):
@@ -81,6 +82,10 @@ class MemberPayload(BaseModel):
 @app.on_event("startup")
 def initialize_database():
     Base.metadata.create_all(bind=engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("projects")}
+    if "client_can_edit" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE projects ADD COLUMN client_can_edit BOOLEAN NOT NULL DEFAULT FALSE"))
 
 
 def user_data(user: User) -> dict:
@@ -105,6 +110,7 @@ def project_data(project: Project) -> dict:
         "slug": project.slug,
         "status": project.status,
         "access_mode": project.access_mode,
+        "client_can_edit": project.client_can_edit,
         "description": project.description,
         "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
@@ -166,9 +172,51 @@ def login_page():
     return FileResponse(os.path.join(HERE, "login.html"))
 
 
+PORTAL_DELIVERY_CONTROLS = """
+<script>
+(() => {
+  const previousRenderProject = window.renderProject;
+  if (typeof previousRenderProject !== 'function') return;
+  window.renderProject = async function(projectId) {
+    await previousRenderProject(projectId);
+    const data = await window.api('/api/projects/' + projectId);
+    const detail = document.querySelector('.detail');
+    if (!detail || document.getElementById('deliveryPolicy')) return;
+    const project = data.project;
+    const policy = document.createElement('form');
+    policy.id = 'deliveryPolicy';
+    policy.className = 'notice';
+    policy.style.marginTop = '18px';
+    policy.innerHTML = '<strong>Entrega ao cliente</strong>' +
+      '<label class="field" style="margin-top:12px">Visibilidade<select id="deliveryAccess"><option value="private">Privado - link controlado</option><option value="link">Por link - sem senha</option><option value="public">Publico - URL publica</option></select></label>' +
+      '<label class="field" style="display:flex;grid-template-columns:auto 1fr;align-items:center;gap:10px;margin-top:12px"><input id="clientCanEdit" type="checkbox"><span>Permitir edicao pelo cliente</span></label>' +
+      '<p style="margin:10px 0 0;font-size:12px">Desligado por padrao: o cliente abre somente o mapa, sem lista, ferramentas ou edicao.</p>' +
+      '<div class="actions" style="margin-top:13px"><button class="primary">Salvar acesso</button></div><div class="error" id="deliveryError"></div>';
+    detail.prepend(policy);
+    document.getElementById('deliveryAccess').value = project.access_mode;
+    document.getElementById('clientCanEdit').checked = !!project.client_can_edit;
+    policy.onsubmit = async event => {
+      event.preventDefault();
+      try {
+        await window.api('/api/projects/' + project.id, {method: 'PATCH', body: JSON.stringify({
+          access_mode: document.getElementById('deliveryAccess').value,
+          client_can_edit: document.getElementById('clientCanEdit').checked
+        })});
+        document.getElementById('deliveryError').textContent = 'Configuracao salva.';
+      } catch (error) {
+        document.getElementById('deliveryError').textContent = error.message;
+      }
+    };
+  };
+})();
+</script>
+"""
+
+
 @app.get("/app")
 def portal_page():
-    return FileResponse(os.path.join(HERE, "portal.html"))
+    with open(os.path.join(HERE, "portal.html"), "r", encoding="utf-8") as portal_file:
+        return HTMLResponse(portal_file.read() + PORTAL_DELIVERY_CONTROLS)
 
 
 @app.post("/api/auth/setup")
@@ -324,6 +372,8 @@ def update_project(project_id: str, payload: ProjectUpdatePayload, user: User = 
         project.status = changes["status"]
     if "access_mode" in changes:
         project.access_mode = changes["access_mode"]
+    if "client_can_edit" in changes:
+        project.client_can_edit = changes["client_can_edit"]
     audit(db, "project_updated", "project", actor=user, target_id=project.id, organization_id=project.organization_id, details=json.dumps(changes))
     db.commit()
     db.refresh(project)
@@ -423,7 +473,13 @@ def create_share_link(project_id: str, payload: ShareLinkPayload, user: User = D
 def shared_map_response(project: Project, version: ProjectVersion):
     if not os.path.isfile(version.map_html_path):
         raise HTTPException(status_code=404, detail="Arquivo do mapa nao encontrado.")
-    return FileResponse(version.map_html_path, media_type="text/html")
+    if project.client_can_edit:
+        return FileResponse(version.map_html_path, media_type="text/html")
+    with open(version.map_html_path, "r", encoding="utf-8") as map_file:
+        html = map_file.read()
+    viewer_guard = """<style id=\"shared-viewer\">#side,#sideToggle,#edit,#editor,#draft,#vertices{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');});</script>"""
+    html = html.replace("</head>", viewer_guard + "</head>", 1)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/p/{slug}")

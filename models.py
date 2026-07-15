@@ -59,6 +59,7 @@ class Project(Base):
     slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
     access_mode: Mapped[str] = mapped_column(String(32), default="private", nullable=False)
+    client_can_edit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
