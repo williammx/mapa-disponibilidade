@@ -10,6 +10,8 @@ output/
 tmp/
 test-results/
 .playwright-cli/
+data/
+*.db
 
 # Generated maps and private source files
 *.pdf
@@ -20,8 +22,18 @@ test-results/
 *.webp
 *.html
 !index.html
+!frontend/index.html
 !README.md
 !README_HF.md
+!frontend/public/*.png
+!frontend/public/*.jpg
+!frontend/public/*.jpeg
+!frontend/public/*.webp
+
+# Frontend dependencies/build cache
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/
 
 # Local logs and secrets
 *.log

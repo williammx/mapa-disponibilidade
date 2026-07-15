@@ -15,6 +15,14 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: mapa-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - mapa_redis_data:/data
+
   mapa-disponibilidade:
     build: .
     container_name: mapa-disponibilidade
@@ -22,17 +30,40 @@ services:
     environment:
       PORT: "7860"
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mapa:mapa-local@db:5432/mapa}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       SESSION_DAYS: ${SESSION_DAYS:-14}
       SETUP_TOKEN: ${SETUP_TOKEN:-}
+      PRIVATE_STORAGE_DIR: /data/storage
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     ports:
       - "127.0.0.1:8000:7860"
+    volumes:
+      - mapa_project_data:/data
+
+  worker:
+    build: .
+    container_name: mapa-worker
+    restart: unless-stopped
+    command: ["sh", "-c", "alembic upgrade head && rq worker pdf-processing --url ${REDIS_URL:-redis://redis:6379/0}"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mapa:mapa-local@db:5432/mapa}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      PRIVATE_STORAGE_DIR: /data/storage
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-900}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
     volumes:
       - mapa_project_data:/data
 
 volumes:
   mapa_postgres_data:
   mapa_project_data:
+  mapa_redis_data:
