@@ -197,11 +197,14 @@ def create_organization(payload: OrganizationCreate, user: User = Depends(curren
 @router.get("/dashboard")
 def dashboard(user: User = Depends(current_user), db: DbSession = Depends(get_db)):
     projects = db.query(Project)
+    jobs = db.query(ProcessingJob)
     if user.platform_role not in {"platform_admin", "operator"}:
-        projects = projects.join(Membership, Membership.organization_id == Project.organization_id).filter(Membership.user_id == user.id)
+        organization_ids = db.query(Membership.organization_id).filter(Membership.user_id == user.id)
+        projects = projects.filter(Project.organization_id.in_(organization_ids))
+        jobs = jobs.filter(ProcessingJob.organization_id.in_(organization_ids))
     project_rows = projects.order_by(Project.updated_at.desc()).limit(8).all()
     proposal_count = db.query(EditProposal).filter(EditProposal.status == "pending").count() if user.platform_role in {"platform_admin", "operator"} else 0
-    failed_jobs = db.query(ProcessingJob).filter(ProcessingJob.status == "failed").count()
+    failed_jobs = jobs.filter(ProcessingJob.status == "failed").count()
     return {
         "metrics": {
             "projects": projects.count(),
@@ -282,9 +285,19 @@ def upload_project_file(project_id: str, upload: UploadFile = File(...), kind: s
     max_bytes = int(os.getenv("MAX_UPLOAD_BYTES", str(80 * 1024 * 1024)))
     storage_key = ensure_project_key(project.id, "uploads", f"{utcnow().strftime('%Y%m%d%H%M%S')}-{safe_filename(upload.filename)}")
     size, digest = write_stream(storage_key, upload.file)
+    stored_path = storage_path(storage_key)
+    try:
+        with stored_path.open("rb") as stored_file:
+            pdf_signature = stored_file.read(5)
+    except OSError:
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="Nao foi possivel validar o PDF.")
+    if kind == "source_pdf" and pdf_signature != b"%PDF-":
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="O arquivo enviado nao possui uma estrutura PDF valida.")
     if size > max_bytes:
         try:
-            storage_path(storage_key).unlink(missing_ok=True)
+            stored_path.unlink(missing_ok=True)
         finally:
             raise HTTPException(status_code=413, detail="Arquivo excede o limite de upload.")
     asset = FileAsset(
@@ -319,10 +332,17 @@ def create_processing_job(project_id: str, source_file_id: str | None = None, qu
     project = require_project_manager(db, user, project_id)
     if quality not in {"light", "balanced", "sharp", "high", "optimized"}:
         raise HTTPException(status_code=422, detail="Qualidade invalida.")
-    asset = db.get(FileAsset, source_file_id) if source_file_id else db.query(FileAsset).filter(
-        FileAsset.project_id == project.id,
-        FileAsset.kind == "source_pdf",
-    ).order_by(FileAsset.created_at.desc()).first()
+    if source_file_id:
+        asset = db.query(FileAsset).filter(
+            FileAsset.id == source_file_id,
+            FileAsset.project_id == project.id,
+            FileAsset.kind == "source_pdf",
+        ).first()
+    else:
+        asset = db.query(FileAsset).filter(
+            FileAsset.project_id == project.id,
+            FileAsset.kind == "source_pdf",
+        ).order_by(FileAsset.created_at.desc()).first()
     if not asset:
         raise HTTPException(status_code=409, detail="Envie um PDF antes de iniciar o processamento.")
     job = ProcessingJob(

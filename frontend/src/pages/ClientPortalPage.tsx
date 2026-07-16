@@ -1,5 +1,6 @@
 import { ArrowRight, LockKey, MapTrifold } from "@phosphor-icons/react";
-import { Link } from "react-router-dom";
+import { useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { isLocalDemoMode, useApi } from "../api";
 import { useWorkspace } from "../workspace";
 import type { Project } from "../workspace";
@@ -9,9 +10,16 @@ type ProjectListResponse = {
 };
 
 export function ClientPortalPage() {
+  const navigate = useNavigate();
   const workspace = useWorkspace();
   const response = useApi<ProjectListResponse>("/api/v1/projects");
   const rows = response.data?.projects ?? (isLocalDemoMode ? workspace.projects.filter((project) => project.status !== "draft" && project.status !== "paused") : []);
+
+  useEffect(() => {
+    if (!isLocalDemoMode && response.error === "Autenticacao necessaria.") {
+      navigate("/entrar?next=%2Fcliente", { replace: true });
+    }
+  }, [navigate, response.error]);
 
   return (
     <main className="min-h-[100dvh] bg-[#081014] text-white">

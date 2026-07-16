@@ -65,8 +65,10 @@ def current_user(request: Request, db: DbSession = Depends(get_db)) -> User:
     user = db.get(User, session.user_id)
     if not user or not user.active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Conta sem acesso.")
-    session.last_seen_at = utcnow()
-    db.commit()
+    now = utcnow()
+    if session.last_seen_at <= now - timedelta(minutes=5):
+        session.last_seen_at = now
+        db.commit()
     return user
 
 

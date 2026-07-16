@@ -29,6 +29,7 @@ data/
 !frontend/public/*.jpg
 !frontend/public/*.jpeg
 !frontend/public/*.webp
+!demo/*.html
 
 # Frontend dependencies/build cache
 frontend/node_modules/

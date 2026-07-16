@@ -30,6 +30,7 @@ DATA_DIR = os.getenv("DATA_DIR", "/data")
 CONVERTER_JOB_DIR = os.getenv("CONVERTER_JOB_DIR", os.path.join(HERE, "data", "converter_jobs"))
 FRONTEND_DIST = os.path.join(HERE, "frontend", "dist")
 FRONTEND_INDEX = os.path.join(FRONTEND_DIST, "index.html")
+DEMO_MAP_PATH = os.path.join(HERE, "demo", "setor-e-demo.html")
 if os.path.isdir(os.path.join(FRONTEND_DIST, "assets")):
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="frontend-assets")
 
@@ -218,6 +219,11 @@ def frontend_hero_image():
 
 @app.get("/entrar")
 def login_spa():
+    return spa_response()
+
+
+@app.get("/cliente")
+def client_portal_spa():
     return spa_response()
 
 
@@ -566,6 +572,21 @@ def shared_map_response(project: Project, version: ProjectVersion):
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
+def read_only_html_response(path: str) -> HTMLResponse:
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Mapa de demonstracao nao encontrado.")
+    with open(path, "r", encoding="utf-8") as map_file:
+        html = map_file.read()
+    viewer_guard = """<style id="shared-viewer">#side,#sideToggle,#edit,#editor,#draft,#vertices,#canvasStatus,#lrot{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');var count=document.getElementById('cnt');if(count)count.textContent='demonstracao';});</script>"""
+    html = html.replace("</head>", viewer_guard + "</head>", 1)
+    return HTMLResponse(html, headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.get("/mapas/setor-e-demo")
+def demo_project_map():
+    return read_only_html_response(DEMO_MAP_PATH)
+
+
 @app.get("/p/{slug}")
 def public_project_map(slug: str, db: DbSession = Depends(get_db)):
     project = db.query(Project).filter(Project.slug == slug, Project.status == "published", Project.access_mode == "public").first()
@@ -587,7 +608,11 @@ def shared_project_map(token: str, request: Request, db: DbSession = Depends(get
     link = db.query(ShareLink).filter(ShareLink.token == token, ShareLink.active.is_(True)).first()
     if not link:
         raise HTTPException(status_code=404, detail="Link nao encontrado.")
+    if link.expires_at and link.expires_at <= utcnow():
+        raise HTTPException(status_code=410, detail="Este link expirou.")
     project = db.get(Project, link.project_id)
+    if not project or project.status != "published":
+        raise HTTPException(status_code=404, detail="Mapa nao publicado.")
     if link.access_mode == "private":
         user = authenticated_request_user(request, db)
         if not user:
@@ -599,18 +624,34 @@ def shared_project_map(token: str, request: Request, db: DbSession = Depends(get
         raise HTTPException(status_code=404, detail="Mapa nao publicado.")
     if link.password_hash:
         return HTMLResponse('<form method="post" style="font:16px system-ui;max-width:360px;margin:15vh auto"><h1>Acesso protegido</h1><input name="password" type="password" autocomplete="current-password" placeholder="Senha" required style="width:100%;padding:12px"><button style="margin-top:12px;padding:12px">Abrir mapa</button></form>')
+    link.last_used_at = utcnow()
+    link.access_count += 1
+    db.commit()
     return shared_map_response(project, version)
 
 
 @app.post("/s/{token}")
-def unlock_shared_project(token: str, password: str = Form(...), db: DbSession = Depends(get_db)):
+def unlock_shared_project(token: str, request: Request, password: str = Form(...), db: DbSession = Depends(get_db)):
     link = db.query(ShareLink).filter(ShareLink.token == token, ShareLink.active.is_(True)).first()
-    if not link or not link.password_hash or not password_hash.verify(password, link.password_hash):
-        raise HTTPException(status_code=403, detail="Senha invalida.")
+    if not link:
+        raise HTTPException(status_code=404, detail="Link nao encontrado.")
+    if link.expires_at and link.expires_at <= utcnow():
+        raise HTTPException(status_code=410, detail="Este link expirou.")
     project = db.get(Project, link.project_id)
+    if not project or project.status != "published":
+        raise HTTPException(status_code=404, detail="Mapa nao publicado.")
+    if link.access_mode == "private":
+        user = authenticated_request_user(request, db)
+        if not user or not can_access_organization(db, user, project.organization_id):
+            raise HTTPException(status_code=403, detail="Este usuario nao possui acesso ao projeto.")
+    if not link.password_hash or not password_hash.verify(password, link.password_hash):
+        raise HTTPException(status_code=403, detail="Senha invalida.")
     version = latest_version(db, project.id, published_only=True)
     if not version:
         raise HTTPException(status_code=404, detail="Mapa nao publicado.")
+    link.last_used_at = utcnow()
+    link.access_count += 1
+    db.commit()
     return shared_map_response(project, version)
 
 

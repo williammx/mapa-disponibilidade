@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY api.py auth.py database.py models.py pdf_to_map.py index.html login.html portal.html alembic.ini ./
 COPY app_v1 ./app_v1
 COPY alembic ./alembic
+COPY demo ./demo
 COPY --from=frontend-build /frontend/dist ./frontend/dist
 
 EXPOSE 7860
