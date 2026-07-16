@@ -124,6 +124,7 @@ export function ProjectWorkspacePage() {
         allowEdit: delivery.allow_edit,
         passwordEnabled: delivery.visibility === "password",
       }));
+      form?.reset();
       setMessage("Versao publicada. O link ja pode ser enviado ao cliente.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Nao foi possivel publicar a versao.");
