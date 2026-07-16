@@ -1,7 +1,7 @@
 import { ArrowRight, CheckCircle, FilePdf, FilePlus, Plus, UploadSimple } from "@phosphor-icons/react";
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useApi } from "../api";
+import { apiRequest, useApi } from "../api";
 import { SectionHeader } from "../components/SectionHeader";
 import { createClient, createProject, stashProjectPdf, useWorkspace } from "../workspace";
 import type { Project } from "../workspace";
@@ -17,6 +17,10 @@ type DashboardResponse = {
   recent_projects: Project[];
 };
 
+type OrganizationsResponse = {
+  organizations: Array<{ id: string; name: string; active: boolean }>;
+};
+
 export function DashboardPage() {
   const navigate = useNavigate();
   const workspace = useWorkspace();
@@ -24,6 +28,7 @@ export function DashboardPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [selectedPdf, setSelectedPdf] = useState<File | null>(null);
   const dashboard = useApi<DashboardResponse>("/api/v1/dashboard");
+  const organizations = useApi<OrganizationsResponse>("/api/v1/organizations");
   const recentProjects = dashboard.data?.recent_projects ?? workspace.projects;
   const metrics = dashboard.data?.metrics ?? {
     projects: workspace.projects.length,
@@ -39,32 +44,51 @@ export function DashboardPage() {
     setSelectedPdf(null);
   }
 
-  function handleClientSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleClientSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "").trim();
     try {
-      createClient(String(form.get("name") ?? ""));
+      await apiRequest("/api/v1/organizations", {
+        method: "POST",
+        body: JSON.stringify({ name, slug: slugify(name) }),
+      });
       closeModal();
+      window.location.reload();
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Modo demo local")) {
+        createClient(name);
+        closeModal();
+        return;
+      }
       setFormError(error instanceof Error ? error.message : "Nao foi possivel criar o cliente.");
     }
   }
 
-  function handleProjectSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleProjectSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "").trim();
+    const organizationId = String(form.get("client") ?? "");
+    const description = String(form.get("description") ?? "");
+    const quality = String(form.get("quality") ?? "balanced") as "light" | "balanced" | "high";
     try {
-      const project = createProject({
-        name: String(form.get("name") ?? ""),
-        client: String(form.get("client") ?? ""),
-        description: String(form.get("description") ?? ""),
-        pdfName: selectedPdf?.name,
-        quality: String(form.get("quality") ?? "balanced") as "light" | "balanced" | "high",
+      const payload = await apiRequest<{ project: Project }>("/api/v1/projects", {
+        method: "POST",
+        body: JSON.stringify({ organization_id: organizationId, name, slug: slugify(name), description }),
       });
-      if (selectedPdf) stashProjectPdf(project.id, selectedPdf);
+      if (selectedPdf) stashProjectPdf(payload.project.id, selectedPdf);
       closeModal();
-      navigate(`/app/projetos/${project.id}`);
+      navigate(`/app/projetos/${payload.project.id}`);
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Modo demo local")) {
+        const client = workspace.clients.find((row) => row.id === organizationId)?.name ?? organizationId;
+        const project = createProject({ name, client, description, pdfName: selectedPdf?.name, quality });
+        if (selectedPdf) stashProjectPdf(project.id, selectedPdf);
+        closeModal();
+        navigate(`/app/projetos/${project.id}`);
+        return;
+      }
       setFormError(error instanceof Error ? error.message : "Nao foi possivel criar o projeto.");
     }
   }
@@ -141,8 +165,8 @@ export function DashboardPage() {
                     <span className="mb-2 block text-sm font-medium text-slate-300">Cliente</span>
                     <select name="client" required className="w-full rounded-[8px] border border-white/12 bg-[#091217] px-4 py-3 outline-none focus:border-emerald-300">
                       <option value="">Selecione</option>
-                      {workspace.clients.map((client) => (
-                        <option key={client.id} value={client.name}>{client.name}</option>
+                      {(organizations.data?.organizations ?? workspace.clients).map((client) => (
+                        <option key={client.id} value={client.id}>{client.name}</option>
                       ))}
                     </select>
                   </label>
@@ -193,6 +217,16 @@ export function DashboardPage() {
       ) : null}
     </div>
   );
+}
+
+function slugify(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 80) || "projeto";
 }
 
 function Metric({ label, value, loading = false }: { label: string; value: number; loading?: boolean }) {
