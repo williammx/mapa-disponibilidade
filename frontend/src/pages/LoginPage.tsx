@@ -1,16 +1,33 @@
 import { ArrowRight, LockKey } from "@phosphor-icons/react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { apiRequest } from "../api";
+import { apiRequest, isLocalDemoMode } from "../api";
 import { BrandLogo } from "../components/BrandLogo";
 
 export function LoginPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const nextPath = safeNextPath(searchParams.get("next"));
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(!isLocalDemoMode);
+
+  useEffect(() => {
+    if (isLocalDemoMode) return;
+    let cancelled = false;
+    apiRequest("/api/auth/me")
+      .then(() => {
+        if (!cancelled) navigate(nextPath, { replace: true });
+      })
+      .catch(() => {
+        if (!cancelled) setCheckingSession(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, nextPath]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -22,19 +39,27 @@ export function LoginPage() {
     setLoading(true);
     try {
       if (import.meta.env.DEV && import.meta.env.VITE_USE_BACKEND !== "true") {
-        navigate(safeNextPath(searchParams.get("next")));
+        navigate(nextPath);
         return;
       }
       await apiRequest("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      navigate(safeNextPath(searchParams.get("next")));
+      navigate(nextPath);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel entrar.");
     } finally {
       setLoading(false);
     }
+  }
+
+  if (checkingSession) {
+    return (
+      <main className="grid min-h-[100dvh] place-items-center bg-[#081014] text-white" role="status">
+        <p className="text-sm text-slate-300">Verificando sua sessao...</p>
+      </main>
+    );
   }
 
   return (

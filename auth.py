@@ -11,7 +11,7 @@ from database import get_db
 from models import AuditEvent, Session, User, utcnow
 
 COOKIE_NAME = "mapa_session"
-SESSION_DAYS = int(os.getenv("SESSION_DAYS", "14"))
+SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
 COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
 password_hash = PasswordHash.recommended()
 

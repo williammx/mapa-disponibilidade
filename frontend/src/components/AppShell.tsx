@@ -1,5 +1,7 @@
 import { Buildings, ClockCounterClockwise, GearSix, ShieldCheck, SquaresFour, UserCircle } from "@phosphor-icons/react";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { apiRequest, isLocalDemoMode } from "../api";
 import { BrandLogo } from "./BrandLogo";
 
 const nav = [
@@ -12,6 +14,40 @@ const nav = [
 ];
 
 export function AppShell() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [userName, setUserName] = useState(isLocalDemoMode ? "William Gabriel" : "");
+  const [checkingSession, setCheckingSession] = useState(!isLocalDemoMode);
+
+  useEffect(() => {
+    if (isLocalDemoMode) return;
+    let cancelled = false;
+    apiRequest<{ user: { name: string } }>("/api/auth/me")
+      .then((payload) => {
+        if (cancelled) return;
+        setUserName(payload.user.name);
+        setCheckingSession(false);
+      })
+      .catch(() => {
+        if (!cancelled) navigate(`/entrar?next=${encodeURIComponent(location.pathname + location.search)}`, { replace: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [location.pathname, location.search, navigate]);
+
+  async function logout() {
+    try {
+      if (!isLocalDemoMode) await apiRequest("/api/auth/logout", { method: "POST" });
+    } finally {
+      navigate("/entrar", { replace: true });
+    }
+  }
+
+  if (checkingSession) {
+    return <div className="grid min-h-[100dvh] place-items-center bg-[#081014] text-sm text-slate-300">Carregando painel...</div>;
+  }
+
   return (
     <div className="min-h-[100dvh] bg-[#081014] text-slate-100">
       <header className="sticky top-0 z-20 border-b border-white/8 bg-[#081014]/92 backdrop-blur-xl">
@@ -20,10 +56,10 @@ export function AppShell() {
             <BrandLogo inverse />
           </Link>
           <div className="flex items-center gap-3 text-sm">
-            <span className="hidden text-slate-300 sm:inline">William Gabriel</span>
-            <Link className="rounded-[8px] border border-white/10 px-3 py-2 text-slate-100 transition hover:bg-white/8" to="/entrar">
+            <span className="hidden text-slate-300 sm:inline">{userName}</span>
+            <button className="rounded-[8px] border border-white/10 px-3 py-2 text-slate-100 transition hover:bg-white/8" onClick={logout}>
               Sair
-            </Link>
+            </button>
           </div>
         </div>
       </header>
