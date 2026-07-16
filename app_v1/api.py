@@ -104,7 +104,7 @@ def project_workspace_dict(db: DbSession, project: Project) -> dict:
         "client": org.name if org else "Cliente nao encontrado",
         "lots": version.lot_count if version else 0,
         "pdfName": source.original_name if source else None,
-        "quality": version.quality if version else "balanced",
+        "quality": version.quality if version and version.quality in {"light", "balanced", "high"} else "balanced",
         "processingStatus": (
             "processing" if job_is_current and job.status in {"queued", "running"}
             else "failed" if job_is_current and job.status == "failed"
@@ -117,7 +117,7 @@ def project_workspace_dict(db: DbSession, project: Project) -> dict:
         "processingLog": [
             entry.get("message", "") if isinstance(entry, dict) else str(entry)
             for entry in (json.loads(job.logs) if job_is_current and job and job.logs else [])
-        ],
+        ] or ([f"Versao existente carregada com {version.lot_count} lotes."] if version else []),
         "processingError": job.error_message if job_is_current and job else None,
         "mapUrl": f"/projects/{project.id}/editor" if version else None,
         "visibility": visibility,
