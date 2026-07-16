@@ -33,6 +33,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       SESSION_DAYS: ${SESSION_DAYS:-14}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       SETUP_TOKEN: ${SETUP_TOKEN:-}
       PRIVATE_STORAGE_DIR: /data/storage
     depends_on:

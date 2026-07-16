@@ -147,7 +147,13 @@ def require_project_manager(db: DbSession, user: User, project_id: str) -> Proje
 
 
 def link_url(request: Request, link: ShareLink, project: Project) -> str:
-    base = str(request.base_url).rstrip("/")
+    configured_base = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if configured_base:
+        base = configured_base
+    else:
+        forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",", 1)[0].strip()
+        forwarded_host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc)).split(",", 1)[0].strip()
+        base = f"{forwarded_proto}://{forwarded_host}".rstrip("/")
     if link.access_mode == "public" or not link.token:
         return f"{base}/mapas/{project.slug}"
     return f"{base}/s/{link.token}"
