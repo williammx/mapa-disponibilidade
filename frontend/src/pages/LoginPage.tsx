@@ -2,6 +2,7 @@ import { ArrowRight, LockKey } from "@phosphor-icons/react";
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { apiRequest } from "../api";
+import { BrandLogo } from "../components/BrandLogo";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -47,8 +48,7 @@ export function LoginPage() {
       <section className="flex items-center justify-center px-6 py-12">
         <div className="w-full max-w-sm">
           <Link to="/" className="mb-10 inline-flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-[8px] bg-emerald-400 font-medium text-slate-950">M</span>
-            <span className="font-medium">Mapa de Disponibilidade</span>
+            <BrandLogo inverse />
           </Link>
           <div className="mb-8">
             <LockKey className="mb-5 text-emerald-300" size={30} weight="bold" />
@@ -61,6 +61,7 @@ export function LoginPage() {
               <input
                 name="email"
                 type="email"
+                autoComplete="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 className="w-full rounded-[8px] border border-white/12 bg-white/5 px-4 py-3 outline-none transition focus:border-emerald-300"
@@ -71,6 +72,7 @@ export function LoginPage() {
               <input
                 name="password"
                 type="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 className="w-full rounded-[8px] border border-white/12 bg-white/5 px-4 py-3 outline-none transition focus:border-emerald-300"

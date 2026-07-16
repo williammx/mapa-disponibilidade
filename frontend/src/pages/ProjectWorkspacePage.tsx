@@ -2,12 +2,14 @@ import { ArrowSquareOut, CheckCircle, Copy, Eye, FilePdf, FloppyDisk, LockKey, P
 import type { ReactNode } from "react";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { useApi } from "../api";
+import { apiRequest, isLocalDemoMode, useApi } from "../api";
 import { attachProjectPdf, publishProject, setProjectProcessing, sharePath, takeProjectPdf, updateProject, useWorkspace } from "../workspace";
 import type { Project, Visibility } from "../workspace";
 
 const tabs = ["Visao geral", "Mapa e editor", "Validacao", "Versoes", "Publicacao", "Acessos", "Atividade"] as const;
 type Tab = (typeof tabs)[number];
+type ShareLink = { id: string; url: string | null; has_password: boolean; access_mode: string; allow_edit: boolean; active: boolean };
+type PublishResponse = { project: Project; share_link: ShareLink };
 
 export function ProjectWorkspacePage() {
   const { projectId } = useParams();
@@ -15,50 +17,77 @@ export function ProjectWorkspacePage() {
   const [activeTab, setActiveTab] = useState<Tab>("Mapa e editor");
   const [message, setMessage] = useState<string | null>(null);
   const [runtimePatch, setRuntimePatch] = useState<Partial<Project>>({});
+  const [publishedShareUrl, setPublishedShareUrl] = useState("");
   const startedPendingPdf = useRef(false);
   const response = useApi<{
     project: Project;
     latest_version: { id: string; lot_count: number; is_published: boolean } | null;
-    share_links: Array<{ id: string; url: string | null; has_password: boolean; allow_edit: boolean; active: boolean }>;
+    share_links: ShareLink[];
   }>(`/api/v1/projects/${projectId}`);
 
-  const baseProject = response.data?.project ?? workspace.projects.find((item) => item.id === projectId);
+  const baseProject = response.data?.project ?? (isLocalDemoMode ? workspace.projects.find((item) => item.id === projectId) : undefined);
   const project = useMemo(() => baseProject ? { ...baseProject, ...runtimePatch } : undefined, [baseProject, runtimePatch]);
   const shareUrl = useMemo(() => {
     if (!project) return "";
     const backendUrl = response.data?.share_links.find((link) => link.active)?.url;
     if (backendUrl) return backendUrl;
+    if (publishedShareUrl) return publishedShareUrl;
+    if (!isLocalDemoMode || project.status !== "published") return "";
     const path = sharePath(project);
     return path.startsWith("http") ? path : `${window.location.origin}${path}`;
-  }, [project, response.data?.share_links]);
+  }, [project, publishedShareUrl, response.data?.share_links]);
 
-  function handleDetailsSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleDetailsSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!project) return;
     const form = new FormData(event.currentTarget);
-    updateProject(project.id, {
+    const patch = {
       name: String(form.get("name") ?? project.name),
       description: String(form.get("description") ?? project.description),
       status: String(form.get("status") ?? project.status) as Project["status"],
-    });
-    setMessage("Alteracoes do projeto salvas.");
+    };
+    try {
+      if (isLocalDemoMode) updateProject(project.id, patch);
+      else await apiRequest(`/api/v1/projects/${project.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      setRuntimePatch((current) => ({ ...current, ...patch }));
+      setMessage("Alteracoes do projeto salvas.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nao foi possivel salvar o projeto.");
+    }
   }
 
-  function handleAccessSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleAccessSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!project) return;
-    const form = new FormData(event.currentTarget);
-    const visibility = String(form.get("visibility") ?? project.visibility) as Visibility;
-    const password = String(form.get("password") ?? "");
-    updateProject(project.id, {
-      visibility,
-      allowEdit: form.get("allowEdit") === "on",
-      passwordEnabled: visibility === "password" && password.trim().length > 0,
-    });
-    setMessage("Acesso salvo. O link publico foi atualizado.");
+    const delivery = deliverySettings(project, event.currentTarget);
+    try {
+      if (isLocalDemoMode) {
+        updateProject(project.id, {
+          visibility: delivery.visibility,
+          allowEdit: delivery.allow_edit,
+          passwordEnabled: delivery.visibility === "password" && Boolean(delivery.password || project.passwordEnabled),
+        });
+      } else if (project.status === "published") {
+        await publish(event.currentTarget);
+        return;
+      } else {
+        await apiRequest(`/api/v1/projects/${project.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ access_mode: delivery.visibility, client_can_edit: delivery.allow_edit }),
+        });
+      }
+      setRuntimePatch((current) => ({ ...current, visibility: delivery.visibility, allowEdit: delivery.allow_edit }));
+      setMessage("Configuracao de acesso salva. Publique a versao para gerar o link.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nao foi possivel salvar o acesso.");
+    }
   }
 
   async function copyLink() {
+    if (!shareUrl) {
+      setMessage("Publique uma versao para gerar o link do cliente.");
+      return;
+    }
     try {
       await navigator.clipboard.writeText(shareUrl);
       setMessage("Link copiado.");
@@ -67,15 +96,42 @@ export function ProjectWorkspacePage() {
     }
   }
 
-  function publish() {
+  async function publish(form?: HTMLFormElement) {
     if (!project) return;
-    publishProject(project.id);
-    setMessage("Versao publicada. O link ja pode ser enviado ao cliente.");
+    const delivery = deliverySettings(project, form);
+    try {
+      if (isLocalDemoMode) {
+        publishProject(project.id);
+        const path = sharePath({ ...project, status: "published", visibility: delivery.visibility });
+        setPublishedShareUrl(path.startsWith("http") ? path : `${window.location.origin}${path}`);
+      } else {
+        const payload = await apiRequest<PublishResponse>(`/api/v1/projects/${project.id}/publish`, {
+          method: "POST",
+          body: JSON.stringify({
+            access_mode: delivery.visibility,
+            password: delivery.password || null,
+            allow_edit: delivery.allow_edit,
+            require_clean_validation: false,
+          }),
+        });
+        setPublishedShareUrl(payload.share_link.url ?? "");
+      }
+      setRuntimePatch((current) => ({
+        ...current,
+        status: "published",
+        visibility: delivery.visibility,
+        allowEdit: delivery.allow_edit,
+        passwordEnabled: delivery.visibility === "password",
+      }));
+      setMessage("Versao publicada. O link ja pode ser enviado ao cliente.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Nao foi possivel publicar a versao.");
+    }
   }
 
   const applyProjectPatch = useCallback((patch: Partial<Project>) => {
     setRuntimePatch((current) => ({ ...current, ...patch }));
-    if (baseProject) setProjectProcessing(baseProject.id, patch);
+    if (isLocalDemoMode && baseProject) setProjectProcessing(baseProject.id, patch);
   }, [baseProject?.id]);
 
   const startProcessing = useCallback(async (file: File, selectedQuality?: Project["quality"]) => {
@@ -204,7 +260,9 @@ export function ProjectWorkspacePage() {
 
   function handleQualityChange(event: ChangeEvent<HTMLSelectElement>) {
     if (!project) return;
-    updateProject(project.id, { quality: event.currentTarget.value as Project["quality"] });
+    const quality = event.currentTarget.value as Project["quality"];
+    setRuntimePatch((current) => ({ ...current, quality }));
+    if (isLocalDemoMode) updateProject(project.id, { quality });
   }
 
   return (
@@ -242,7 +300,7 @@ export function ProjectWorkspacePage() {
       </div>
 
       {activeTab === "Visao geral" ? <Overview project={project} onSubmit={handleDetailsSubmit} /> : null}
-      {activeTab === "Mapa e editor" ? <Editor project={project} onPdfChange={handlePdfChange} onQualityChange={handleQualityChange} onRetry={() => document.getElementById("workspace-pdf")?.click()} /> : null}
+      {activeTab === "Mapa e editor" ? <Editor project={project} shareUrl={shareUrl} onPdfChange={handlePdfChange} onQualityChange={handleQualityChange} onRetry={() => document.getElementById("workspace-pdf")?.click()} /> : null}
       {activeTab === "Validacao" ? <Validation /> : null}
       {activeTab === "Versoes" ? <Versions project={project} onPublish={publish} /> : null}
       {activeTab === "Publicacao" ? <Publication project={project} shareUrl={shareUrl} onSubmit={handleAccessSubmit} onCopy={copyLink} onPublish={publish} /> : null}
@@ -284,7 +342,7 @@ function Overview({ project, onSubmit }: { project: Project; onSubmit: (event: F
   );
 }
 
-function Editor({ project, onPdfChange, onQualityChange, onRetry }: { project: Project; onPdfChange: (event: ChangeEvent<HTMLInputElement>) => void; onQualityChange: (event: ChangeEvent<HTMLSelectElement>) => void; onRetry: () => void }) {
+function Editor({ project, shareUrl, onPdfChange, onQualityChange, onRetry }: { project: Project; shareUrl: string; onPdfChange: (event: ChangeEvent<HTMLInputElement>) => void; onQualityChange: (event: ChangeEvent<HTMLSelectElement>) => void; onRetry: () => void }) {
   const progress = project.processingProgress ?? 0;
   const status = project.processingStatus ?? "empty";
   return (
@@ -370,7 +428,11 @@ function Editor({ project, onPdfChange, onQualityChange, onRetry }: { project: P
           <Step done={project.visibility !== "private" || project.passwordEnabled} label="Link configurado" />
         </div>
         <div className="mt-6 grid gap-3">
-          <Link to={`/mapas/${project.slug}`} className="rounded-[8px] border border-white/12 px-4 py-3 text-center text-sm font-medium">Ver link do cliente</Link>
+          {shareUrl ? (
+            <a href={shareUrl} className="rounded-[8px] border border-white/12 px-4 py-3 text-center text-sm font-medium">Ver link do cliente</a>
+          ) : (
+            <button type="button" disabled className="rounded-[8px] border border-white/8 px-4 py-3 text-sm font-medium text-slate-500">Publique para gerar o link</button>
+          )}
           <p className="text-xs leading-5 text-slate-500">O link do cliente abre somente o mapa. Ferramentas de edicao ficam escondidas por padrao.</p>
         </div>
       </div>
@@ -435,7 +497,7 @@ function Versions({ project, onPublish }: { project: Project; onPublish: () => v
   );
 }
 
-function Publication({ project, shareUrl, onSubmit, onCopy, onPublish }: { project: Project; shareUrl: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onCopy: () => void; onPublish: () => void }) {
+function Publication({ project, shareUrl, onSubmit, onCopy, onPublish }: { project: Project; shareUrl: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onCopy: () => void; onPublish: (form?: HTMLFormElement) => void }) {
   return (
     <section className="grid gap-6 xl:grid-cols-[1fr_420px]">
       <form onSubmit={onSubmit} className="rounded-[8px] border border-white/10 bg-white/4 p-6">
@@ -451,7 +513,7 @@ function Publication({ project, shareUrl, onSubmit, onCopy, onPublish }: { proje
               <option value="public">Publico por URL</option>
             </select>
           </label>
-          <Field name="password" label="Senha opcional" type="password" placeholder="Defina ou atualize a senha" />
+          <Field name="password" label="Senha opcional" type="password" autoComplete="new-password" placeholder="Defina ou atualize a senha" />
           <label className="flex items-center justify-between gap-5 rounded-[8px] border border-white/10 p-4">
             <span>
               <span className="block font-medium">Permitir edicao pelo cliente</span>
@@ -464,7 +526,7 @@ function Publication({ project, shareUrl, onSubmit, onCopy, onPublish }: { proje
               <FloppyDisk size={17} weight="bold" />
               Salvar acesso
             </button>
-            <button type="button" onClick={onPublish} className="inline-flex items-center gap-2 rounded-[8px] border border-white/12 px-4 py-3 text-sm font-medium">
+            <button type="button" onClick={(event) => onPublish(event.currentTarget.form ?? undefined)} className="inline-flex items-center gap-2 rounded-[8px] border border-white/12 px-4 py-3 text-sm font-medium">
               <UploadSimple size={17} weight="bold" />
               Publicar versao
             </button>
@@ -483,7 +545,7 @@ function Access({ project, shareUrl }: { project: Project; shareUrl: string }) {
       <div className="mt-5 grid gap-4">
         <div className="rounded-[8px] border border-white/10 p-4">
           <p className="font-medium">{visibilityLabel(project.visibility)}</p>
-          <p className="mt-2 break-all text-sm text-emerald-200">{shareUrl}</p>
+          <p className="mt-2 break-all text-sm text-emerald-200">{shareUrl || "Nenhum link ativo. Publique uma versao primeiro."}</p>
           <p className="mt-2 text-sm text-slate-400">{project.allowEdit ? "Cliente pode enviar proposta de edicao." : "Somente leitura para o cliente."}</p>
         </div>
       </div>
@@ -508,16 +570,23 @@ function SharePanel({ project, shareUrl, onCopy }: { project: Project; shareUrl:
       <div className="rounded-[8px] border border-white/10 p-5">
         <h3 className="font-medium">Compartilhar</h3>
         <p className="mt-2 text-sm text-slate-400">Link atual da versao publicada.</p>
-        <div className="mt-4 break-all rounded-[8px] border border-white/10 bg-black/20 p-3 text-sm text-emerald-200">{shareUrl}</div>
+        <div className="mt-4 break-all rounded-[8px] border border-white/10 bg-black/20 p-3 text-sm text-emerald-200">{shareUrl || "Publique uma versao para gerar o link."}</div>
         <div className="mt-4 grid grid-cols-2 gap-3">
-          <button onClick={onCopy} className="inline-flex items-center justify-center gap-2 rounded-[8px] border border-white/12 px-3 py-2 text-sm font-medium">
+          <button onClick={onCopy} disabled={!shareUrl} className="inline-flex items-center justify-center gap-2 rounded-[8px] border border-white/12 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40">
             <Copy size={16} weight="bold" />
             Copiar
           </button>
-          <Link to={`/mapas/${project.slug}`} className="inline-flex items-center justify-center gap-2 rounded-[8px] border border-white/12 px-3 py-2 text-sm font-medium">
-            <ArrowSquareOut size={16} weight="bold" />
-            Abrir
-          </Link>
+          {shareUrl ? (
+            <a href={shareUrl} className="inline-flex items-center justify-center gap-2 rounded-[8px] border border-white/12 px-3 py-2 text-sm font-medium">
+              <ArrowSquareOut size={16} weight="bold" />
+              Abrir
+            </a>
+          ) : (
+            <button disabled className="inline-flex items-center justify-center gap-2 rounded-[8px] border border-white/12 px-3 py-2 text-sm font-medium opacity-40">
+              <ArrowSquareOut size={16} weight="bold" />
+              Abrir
+            </button>
+          )}
         </div>
       </div>
       <div className="rounded-[8px] border border-white/10 p-5">
@@ -532,11 +601,11 @@ function SharePanel({ project, shareUrl, onCopy }: { project: Project; shareUrl:
   );
 }
 
-function Field({ name, label, defaultValue, type = "text", placeholder }: { name: string; label: string; defaultValue?: string; type?: string; placeholder?: string }) {
+function Field({ name, label, defaultValue, type = "text", placeholder, autoComplete }: { name: string; label: string; defaultValue?: string; type?: string; placeholder?: string; autoComplete?: string }) {
   return (
     <label>
       <span className="mb-2 block text-sm font-medium text-slate-300">{label}</span>
-      <input name={name} type={type} defaultValue={defaultValue} placeholder={placeholder} className="w-full rounded-[8px] border border-white/12 bg-[#091217] px-4 py-3 outline-none focus:border-emerald-300" />
+      <input name={name} type={type} defaultValue={defaultValue} placeholder={placeholder} autoComplete={autoComplete} className="w-full rounded-[8px] border border-white/12 bg-[#091217] px-4 py-3 outline-none focus:border-emerald-300" />
     </label>
   );
 }
@@ -571,6 +640,18 @@ function visibilityLabel(visibility: Visibility) {
   if (visibility === "password") return "Link protegido por senha";
   if (visibility === "public") return "Publico";
   return "Link sem senha";
+}
+
+function deliverySettings(project: Project, form?: HTMLFormElement) {
+  if (!form) {
+    return { visibility: project.visibility, password: "", allow_edit: project.allowEdit };
+  }
+  const data = new FormData(form);
+  return {
+    visibility: String(data.get("visibility") ?? project.visibility) as Visibility,
+    password: String(data.get("password") ?? "").trim(),
+    allow_edit: data.get("allowEdit") === "on",
+  };
 }
 
 function projectEditorUrl(project: Project) {

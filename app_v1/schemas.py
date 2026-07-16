@@ -66,3 +66,10 @@ class ProposalDecision(BaseModel):
 
 class PublishVersionPayload(BaseModel):
     require_clean_validation: bool = True
+
+
+class ProjectPublishPayload(BaseModel):
+    access_mode: str = Field(default="private", pattern=r"^(private|password|unlisted|public)$")
+    password: str | None = Field(default=None, max_length=128)
+    allow_edit: bool = False
+    require_clean_validation: bool = False

@@ -932,7 +932,7 @@ def _normalize_lot(item, index=0):
     }
 
 
-def build_html(b64, W, H, data, title="Mapa de Disponibilidade", img_mime="image/jpeg",
+def build_html(b64, W, H, data, title="Mapa NexoLote", img_mime="image/jpeg",
                opacity=DEFAULT_OPACITY, stroke_width=DEFAULT_STROKE_WIDTH,
                label_mode=DEFAULT_LABEL_MODE):
     data = [_normalize_lot(item, i) for i, item in enumerate(data)]
@@ -954,7 +954,7 @@ def build_html(b64, W, H, data, title="Mapa de Disponibilidade", img_mime="image
 
 def convert(pdf_path, out_html, page_index=0, max_px=None, rotate="auto",
             area_min=800, area_max=9000, status_csv=None, geojson_out=None,
-            snapshot_out=None, title="Mapa de Disponibilidade", quality="balanced",
+            snapshot_out=None, title="Mapa NexoLote", quality="balanced",
             opacity=DEFAULT_OPACITY, stroke_width=DEFAULT_STROKE_WIDTH,
             label_mode=DEFAULT_LABEL_MODE):
     """Fundo do PDF estatico; os lotes entram como camada vetorial editavel."""
@@ -1381,7 +1381,7 @@ if __name__ == "__main__":
     ap.add_argument("--opacity", type=float, default=DEFAULT_OPACITY)
     ap.add_argument("--stroke-width", type=float, default=DEFAULT_STROKE_WIDTH)
     ap.add_argument("--label-mode", choices=["auto", "always", "hidden"], default=DEFAULT_LABEL_MODE)
-    ap.add_argument("--title", default="Mapa de Disponibilidade")
+    ap.add_argument("--title", default="Mapa NexoLote")
     a = ap.parse_args()
     print("OK ->", json.dumps(convert(a.pdf, a.out, page_index=a.page, max_px=a.max_px,
           rotate=a.rotate, area_min=a.area_min, area_max=a.area_max, status_csv=a.status_csv,

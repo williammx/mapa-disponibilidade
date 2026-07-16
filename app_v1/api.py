@@ -31,6 +31,7 @@ from .schemas import (
     LotPatch,
     OrganizationCreate,
     ProjectCreate,
+    ProjectPublishPayload,
     ProjectUpdate,
     ProposalDecision,
     PublishVersionPayload,
@@ -424,6 +425,75 @@ def publish_version(version_id: str, payload: PublishVersionPayload, user: User 
     audit(db, "project_version_published", "project_version", actor=user, target_id=version.id, organization_id=project.organization_id)
     db.commit()
     return {"version": version_dict(version), "url": f"/mapas/{project.slug}"}
+
+
+@router.post("/projects/{project_id}/publish")
+def publish_project_delivery(project_id: str, payload: ProjectPublishPayload, request: Request,
+                             user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    """Publish the latest map and rotate its client link atomically."""
+    project = require_project_manager(db, user, project_id)
+    version = latest_version(db, project.id)
+    if not version:
+        raise HTTPException(status_code=409, detail="Gere uma versao do mapa antes de publicar.")
+
+    lots = db.query(Lot).filter(Lot.project_version_id == version.id).all()
+    summary = validate_lots(lots)
+    version.validation_summary = json.dumps(summary, ensure_ascii=False)
+    if payload.require_clean_validation and summary["error_count"]:
+        raise HTTPException(status_code=409, detail={
+            "message": "Existem erros de validacao antes da publicacao.",
+            "validation": summary,
+        })
+    current_link = db.query(ShareLink).filter(
+        ShareLink.project_id == project.id,
+        ShareLink.active.is_(True),
+    ).order_by(ShareLink.created_at.desc()).first()
+    if payload.access_mode == "password" and not payload.password and not (current_link and current_link.password_hash):
+        raise HTTPException(status_code=422, detail="Defina uma senha para proteger o link.")
+
+    db.query(ProjectVersion).filter(ProjectVersion.project_id == project.id).update({"is_published": False})
+    db.query(ShareLink).filter(ShareLink.project_id == project.id, ShareLink.active.is_(True)).update({"active": False})
+
+    version.is_published = True
+    version.status = "published"
+    project.status = "published"
+    project.access_mode = payload.access_mode
+    project.client_can_edit = payload.allow_edit
+
+    link_access_mode = "token" if payload.access_mode == "unlisted" else payload.access_mode
+    token = None if payload.access_mode == "public" else secrets.token_urlsafe(18)
+    link = ShareLink(
+        project_id=project.id,
+        token=token,
+        token_hash=hash_token(token) if token else None,
+        password_hash=(
+            password_hash.hash(payload.password)
+            if payload.password
+            else current_link.password_hash if payload.access_mode == "password" and current_link else None
+        ),
+        access_mode=link_access_mode,
+        allow_edit=payload.allow_edit,
+        active=True,
+    )
+    db.add(link)
+    db.flush()
+    audit(
+        db,
+        "project_published",
+        "project_version",
+        actor=user,
+        target_id=version.id,
+        organization_id=project.organization_id,
+        details=json.dumps({"share_link_id": link.id, "access_mode": payload.access_mode}, ensure_ascii=False),
+    )
+    db.commit()
+    db.refresh(version)
+    db.refresh(link)
+    return {
+        "project": project_workspace_dict(db, project),
+        "version": version_dict(version),
+        "share_link": share_link_dict(link, link_url(request, link, project)),
+    }
 
 
 @router.get("/project-versions/{version_id}/lots")

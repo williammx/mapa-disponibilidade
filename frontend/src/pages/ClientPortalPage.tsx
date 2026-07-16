@@ -1,6 +1,6 @@
 import { ArrowRight, LockKey, MapTrifold } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
-import { useApi } from "../api";
+import { isLocalDemoMode, useApi } from "../api";
 import { useWorkspace } from "../workspace";
 import type { Project } from "../workspace";
 
@@ -11,7 +11,7 @@ type ProjectListResponse = {
 export function ClientPortalPage() {
   const workspace = useWorkspace();
   const response = useApi<ProjectListResponse>("/api/v1/projects");
-  const rows = response.data?.projects ?? workspace.projects.filter((project) => project.status !== "draft" && project.status !== "paused");
+  const rows = response.data?.projects ?? (isLocalDemoMode ? workspace.projects.filter((project) => project.status !== "draft" && project.status !== "paused") : []);
 
   return (
     <main className="min-h-[100dvh] bg-[#081014] text-white">
@@ -40,10 +40,10 @@ export function ClientPortalPage() {
                   <LockKey size={14} weight="regular" />
                   {visibilityLabel(project.visibility)}
                 </span>
-                <Link to={`/mapas/${project.slug}`} className="inline-flex items-center gap-2 text-sm font-medium text-emerald-300">
+                <a href={project.shareUrl || `/mapas/${project.slug}`} className="inline-flex items-center gap-2 text-sm font-medium text-emerald-300">
                   Abrir
                   <ArrowRight size={16} weight="regular" />
-                </Link>
+                </a>
               </div>
             </article>
           ))}

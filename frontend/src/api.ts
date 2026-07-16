@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+export const isLocalDemoMode = import.meta.env.DEV && import.meta.env.VITE_USE_BACKEND !== "true";
+
 export type ApiState<T> = {
   data: T | null;
   loading: boolean;
@@ -7,7 +9,7 @@ export type ApiState<T> = {
 };
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  if (import.meta.env.DEV && import.meta.env.VITE_USE_BACKEND !== "true" && path.startsWith("/api")) {
+  if (isLocalDemoMode && path.startsWith("/api")) {
     throw new Error("Modo demo local: backend nao conectado.");
   }
   const response = await fetch(path, {

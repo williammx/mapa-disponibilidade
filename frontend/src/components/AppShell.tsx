@@ -1,5 +1,6 @@
 import { Buildings, ClockCounterClockwise, GearSix, ShieldCheck, SquaresFour, UserCircle } from "@phosphor-icons/react";
 import { Link, NavLink, Outlet } from "react-router-dom";
+import { BrandLogo } from "./BrandLogo";
 
 const nav = [
   { to: "/app", label: "Projetos", icon: SquaresFour, end: true },
@@ -16,8 +17,7 @@ export function AppShell() {
       <header className="sticky top-0 z-20 border-b border-white/8 bg-[#081014]/92 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-[1500px] items-center justify-between px-5">
           <Link to="/" className="flex items-center gap-3">
-            <span className="grid size-9 place-items-center rounded-[8px] bg-emerald-400 text-sm font-medium text-slate-950">M</span>
-            <span className="font-semibold">Mapa de Disponibilidade</span>
+            <BrandLogo inverse />
           </Link>
           <div className="flex items-center gap-3 text-sm">
             <span className="hidden text-slate-300 sm:inline">William Gabriel</span>

@@ -38,7 +38,7 @@
 - Copy and content: headline, CTA structure and real-estate availability language match the selected landing concept while using the project's current name.
 
 **Open Questions**
-- Brand name remains `Mapa de Disponibilidade`. The selected visual used `MapLot`, but the product currently uses the existing project name.
+- Product identity is `NexoLote`, with a parcel-built N symbol and a consistent emerald/graphite system across the public site and authenticated product.
 
 **Implementation Checklist**
 - Keep the React landing as the root page.

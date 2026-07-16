@@ -1,6 +1,6 @@
 import { Buildings, Check, EnvelopeSimple, Plus } from "@phosphor-icons/react";
 import { FormEvent, useState } from "react";
-import { useApi } from "../api";
+import { apiRequest, isLocalDemoMode, useApi } from "../api";
 import { SectionHeader } from "../components/SectionHeader";
 import { createClient, useWorkspace } from "../workspace";
 
@@ -20,16 +20,25 @@ export function ClientsPage() {
     contacts: org.contact_count,
     projects: org.project_count,
     access: org.active ? "Ativo" : "Pausado",
-  })) ?? workspace.clients;
+  })) ?? (isLocalDemoMode ? workspace.clients : []);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "").trim();
     try {
-      createClient(String(form.get("name") ?? ""));
+      if (isLocalDemoMode) {
+        createClient(name);
+      } else {
+        await apiRequest("/api/v1/organizations", {
+          method: "POST",
+          body: JSON.stringify({ name, slug: slugify(name) }),
+        });
+      }
       setShowForm(false);
       setError(null);
       event.currentTarget.reset();
+      if (!isLocalDemoMode) window.location.reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel criar o cliente.");
     }
@@ -80,4 +89,14 @@ export function ClientsPage() {
       </div>
     </div>
   );
+}
+
+function slugify(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 80) || "cliente";
 }

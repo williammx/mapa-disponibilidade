@@ -1,7 +1,7 @@
 import { ArrowRight, CheckCircle, FilePdf, FilePlus, Plus, UploadSimple } from "@phosphor-icons/react";
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { apiRequest, useApi } from "../api";
+import { apiRequest, isLocalDemoMode, useApi } from "../api";
 import { SectionHeader } from "../components/SectionHeader";
 import { createClient, createProject, stashProjectPdf, useWorkspace } from "../workspace";
 import type { Project } from "../workspace";
@@ -29,11 +29,11 @@ export function DashboardPage() {
   const [selectedPdf, setSelectedPdf] = useState<File | null>(null);
   const dashboard = useApi<DashboardResponse>("/api/v1/dashboard");
   const organizations = useApi<OrganizationsResponse>("/api/v1/organizations");
-  const recentProjects = dashboard.data?.recent_projects ?? workspace.projects;
+  const recentProjects = dashboard.data?.recent_projects ?? (isLocalDemoMode ? workspace.projects : []);
   const metrics = dashboard.data?.metrics ?? {
-    projects: workspace.projects.length,
-    in_review: workspace.projects.filter((project) => project.status === "review").length,
-    published: workspace.projects.filter((project) => project.status === "published").length,
+    projects: isLocalDemoMode ? workspace.projects.length : 0,
+    in_review: isLocalDemoMode ? workspace.projects.filter((project) => project.status === "review").length : 0,
+    published: isLocalDemoMode ? workspace.projects.filter((project) => project.status === "published").length : 0,
     failed_jobs: 0,
     pending_proposals: 0,
   };
@@ -165,7 +165,7 @@ export function DashboardPage() {
                     <span className="mb-2 block text-sm font-medium text-slate-300">Cliente</span>
                     <select name="client" required className="w-full rounded-[8px] border border-white/12 bg-[#091217] px-4 py-3 outline-none focus:border-emerald-300">
                       <option value="">Selecione</option>
-                      {(organizations.data?.organizations ?? workspace.clients).map((client) => (
+                      {(organizations.data?.organizations ?? (isLocalDemoMode ? workspace.clients : [])).map((client) => (
                         <option key={client.id} value={client.id}>{client.name}</option>
                       ))}
                     </select>

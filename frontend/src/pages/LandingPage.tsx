@@ -17,6 +17,7 @@ import {
   UsersThree,
 } from "@phosphor-icons/react";
 import { Link } from "react-router-dom";
+import { BrandLogo } from "../components/BrandLogo";
 
 const proof = [
   { icon: MapTrifold, label: "Mapa interativo" },
@@ -87,8 +88,7 @@ export function LandingPage() {
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(4,9,8,0.9)_0%,rgba(4,9,8,0.7)_34%,rgba(4,9,8,0.15)_72%,rgba(4,9,8,0.04)_100%)]" />
         <nav className="relative z-10 mx-4 mt-4 flex items-center justify-between rounded-[8px] border border-white/14 bg-[#08100e]/70 px-5 py-4 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.8)] backdrop-blur-xl md:mx-6 lg:mx-10">
           <Link to="/" className="flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-[8px] bg-emerald-400 text-lg font-medium text-slate-950">M</span>
-            <span className="text-lg font-medium tracking-tight">Mapa de Disponibilidade</span>
+            <BrandLogo inverse />
           </Link>
           <div className="hidden items-center gap-8 text-sm text-slate-200 md:flex">
             <a href="#solucao" className="transition hover:text-white">Solucao</a>

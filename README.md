@@ -1,4 +1,4 @@
-# Mapa de Disponibilidade
+# NexoLote
 
 MVP que converte PDFs vetoriais de loteamentos em mapas interativos de disponibilidade. Os lotes podem receber status, cor, opacidade, etiquetas e ajustes manuais.
 

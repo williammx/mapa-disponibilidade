@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 184 44" role="img" aria-labelledby="title">
+  <title id="title">NexoLote</title>
+  <g transform="translate(4 4)">
+    <path d="M3 8.25 11 4v19.5L3 28V8.25Z" fill="#34d399"/>
+    <path d="m11 4 22 20.25L25 32 11 18.75V4Z" fill="#10b981"/>
+    <path d="m25 8.25 8-4.25v20.25L25 32V8.25Z" fill="#6ee7b7"/>
+    <path d="M11 18.75 25 32v-7.75L11 11.25v7.5Z" fill="#059669"/>
+  </g>
+  <text x="51" y="29" fill="#ffffff" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="500">Nexo</text>
+  <text x="103" y="29" fill="#34d399" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="500">Lote</text>
+</svg>

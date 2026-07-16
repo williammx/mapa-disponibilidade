@@ -1,5 +1,5 @@
 import { ClockCounterClockwise } from "@phosphor-icons/react";
-import { useApi } from "../api";
+import { isLocalDemoMode, useApi } from "../api";
 import { SectionHeader } from "../components/SectionHeader";
 import { useWorkspace } from "../workspace";
 
@@ -10,7 +10,7 @@ type AuditResponse = {
 export function ActivityPage() {
   const workspace = useWorkspace();
   const response = useApi<AuditResponse>("/api/v1/audit-events");
-  const rows = response.data?.audit_events.map((event) => `${event.actor_name ?? "Sistema"} executou ${event.action} em ${event.target_type}.`) ?? workspace.activity;
+  const rows = response.data?.audit_events.map((event) => `${event.actor_name ?? "Sistema"} executou ${event.action} em ${event.target_type}.`) ?? (isLocalDemoMode ? workspace.activity : []);
 
   return (
     <div className="space-y-9">

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""API do Mapa de Disponibilidade e portal autenticado."""
+"""API da plataforma NexoLote e portal autenticado."""
 import json
 import os
 import re
@@ -23,7 +23,7 @@ from database import Base, engine, get_db
 from models import Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
 from app_v1.api import router as api_v1_router
 
-app = FastAPI(title="Mapa de Disponibilidade")
+app = FastAPI(title="NexoLote")
 app.include_router(api_v1_router)
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -630,7 +630,7 @@ def create_project(organization_id: str, payload: ProjectPayload, user: User = D
 @app.post("/converter")
 async def converter(arquivo: UploadFile = File(...), rotate: str = Query("auto"),
                     area_min: float = Query(800), area_max: float = Query(9000),
-                    title: str = Query("Mapa de Disponibilidade"),
+                    title: str = Query("Mapa NexoLote"),
                     quality: str = Query("balanced")):
     with tempfile.TemporaryDirectory() as tmp:
         pdf_path = os.path.join(tmp, "in.pdf")
@@ -738,7 +738,7 @@ def run_converter_job(job_id: str, title: str, quality: str) -> None:
 
 @app.post("/converter/jobs", status_code=202)
 async def create_converter_job(background_tasks: BackgroundTasks, arquivo: UploadFile = File(...),
-                               title: str = Query("Mapa de Disponibilidade"),
+                               title: str = Query("Mapa NexoLote"),
                                quality: str = Query("balanced"),
                                project_id: str | None = Query(default=None),
                                project_slug: str | None = Query(default=None)):
@@ -781,7 +781,7 @@ async def create_converter_job(background_tasks: BackgroundTasks, arquivo: Uploa
         "map_url": f"/converter/jobs/{job_id}/map",
     }
     write_converter_job(job_id, job)
-    background_tasks.add_task(run_converter_job, job_id, title.strip() or "Mapa de Disponibilidade", quality)
+    background_tasks.add_task(run_converter_job, job_id, title.strip() or "Mapa NexoLote", quality)
     return {"job": job}
 
 
@@ -990,7 +990,7 @@ async def render(payload: dict = Body(...)):
     try:
         html = pdf_to_map.build_html(
             payload["img"], int(payload["w"]), int(payload["h"]), payload.get("lots", []),
-            payload.get("title", "Mapa de Disponibilidade"), payload.get("img_mime", "image/jpeg"),
+            payload.get("title", "Mapa NexoLote"), payload.get("img_mime", "image/jpeg"),
             payload.get("opacity", pdf_to_map.DEFAULT_OPACITY),
             payload.get("stroke_width", pdf_to_map.DEFAULT_STROKE_WIDTH),
             payload.get("label_mode", pdf_to_map.DEFAULT_LABEL_MODE),

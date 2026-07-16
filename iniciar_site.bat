@@ -2,7 +2,7 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 echo ============================================================
-echo   Mapa de Disponibilidade - iniciando o site
+echo   NexoLote - iniciando o site
 echo ============================================================
 echo.
 echo [1/3] Encerrando qualquer servidor antigo na porta 8000...

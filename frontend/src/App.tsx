@@ -12,24 +12,28 @@ import { PublicMapPage } from "./pages/PublicMapPage";
 import { ClientPortalPage } from "./pages/ClientPortalPage";
 import { AdminPage } from "./pages/AdminPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { isLocalDemoMode } from "./api";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 
 export function App() {
   return (
-    <Routes>
-      <Route path="/" element={<LandingPage />} />
-      <Route path="/entrar" element={<LoginPage />} />
-      <Route path="/cliente" element={<ClientPortalPage />} />
-      <Route path="/mapas/:slug" element={<PublicMapPage />} />
-      <Route path="/app" element={<AppShell />}>
-        <Route index element={<DashboardPage />} />
-        <Route path="clientes" element={<ClientsPage />} />
-        <Route path="atividade" element={<ActivityPage />} />
-        <Route path="perfil" element={<ProfilePage />} />
-        <Route path="preferencias" element={<PreferencesPage />} />
-        <Route path="admin" element={<AdminPage />} />
-        <Route path="projetos/:projectId" element={<ProjectWorkspacePage />} />
-      </Route>
-      <Route path="*" element={<NotFoundPage />} />
-    </Routes>
+    <AppErrorBoundary>
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/entrar" element={<LoginPage />} />
+        <Route path="/cliente" element={<ClientPortalPage />} />
+        {isLocalDemoMode ? <Route path="/mapas/:slug" element={<PublicMapPage />} /> : null}
+        <Route path="/app" element={<AppShell />}>
+          <Route index element={<DashboardPage />} />
+          <Route path="clientes" element={<ClientsPage />} />
+          <Route path="atividade" element={<ActivityPage />} />
+          <Route path="perfil" element={<ProfilePage />} />
+          <Route path="preferencias" element={<PreferencesPage />} />
+          <Route path="admin" element={<AdminPage />} />
+          <Route path="projetos/:projectId" element={<ProjectWorkspacePage />} />
+        </Route>
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
+    </AppErrorBoundary>
   );
 }
