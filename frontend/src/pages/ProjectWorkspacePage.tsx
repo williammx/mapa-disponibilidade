@@ -14,6 +14,7 @@ export function ProjectWorkspacePage() {
   const workspace = useWorkspace();
   const [activeTab, setActiveTab] = useState<Tab>("Mapa e editor");
   const [message, setMessage] = useState<string | null>(null);
+  const [runtimePatch, setRuntimePatch] = useState<Partial<Project>>({});
   const startedPendingPdf = useRef(false);
   const response = useApi<{
     project: Project;
@@ -21,7 +22,8 @@ export function ProjectWorkspacePage() {
     share_links: Array<{ id: string; url: string | null; has_password: boolean; allow_edit: boolean; active: boolean }>;
   }>(`/api/v1/projects/${projectId}`);
 
-  const project = response.data?.project ?? workspace.projects.find((item) => item.id === projectId);
+  const baseProject = response.data?.project ?? workspace.projects.find((item) => item.id === projectId);
+  const project = useMemo(() => baseProject ? { ...baseProject, ...runtimePatch } : undefined, [baseProject, runtimePatch]);
   const shareUrl = useMemo(() => {
     if (!project) return "";
     const backendUrl = response.data?.share_links.find((link) => link.active)?.url;
@@ -29,16 +31,6 @@ export function ProjectWorkspacePage() {
     const path = sharePath(project);
     return path.startsWith("http") ? path : `${window.location.origin}${path}`;
   }, [project, response.data?.share_links]);
-
-  if (!project) {
-    return (
-      <div className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-6">
-        <h1 className="text-2xl font-medium text-orange-100">Projeto nao encontrado</h1>
-        <p className="mt-2 text-slate-300">Volte para a lista e escolha um projeto existente.</p>
-        <Link to="/app" className="mt-5 inline-flex rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950">Voltar aos projetos</Link>
-      </div>
-    );
-  }
 
   function handleDetailsSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -81,11 +73,18 @@ export function ProjectWorkspacePage() {
     setMessage("Versao publicada. O link ja pode ser enviado ao cliente.");
   }
 
+  const applyProjectPatch = useCallback((patch: Partial<Project>) => {
+    setRuntimePatch((current) => ({ ...current, ...patch }));
+    if (baseProject) setProjectProcessing(baseProject.id, patch);
+  }, [baseProject?.id]);
+
   const startProcessing = useCallback(async (file: File, selectedQuality?: Project["quality"]) => {
     if (!project) return;
     const quality = selectedQuality ?? project.quality ?? "balanced";
     attachProjectPdf(project.id, file.name, quality);
-    setProjectProcessing(project.id, {
+    applyProjectPatch({
+      pdfName: file.name,
+      quality,
       processingStatus: "processing",
       processingProgress: 2,
       processingError: undefined,
@@ -94,23 +93,33 @@ export function ProjectWorkspacePage() {
     });
     setMessage(null);
     const body = new FormData();
-    body.append("arquivo", file);
+    body.append("upload", file);
     try {
-      const query = new URLSearchParams({ title: project.name, quality, project_id: project.id, project_slug: project.slug });
-      const response = await fetch(`/converter/jobs?${query}`, { method: "POST", body });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail ?? payload.erro ?? "Nao foi possivel iniciar o processamento.");
-      setProjectProcessing(project.id, {
+      const uploadResponse = await fetch(`/api/v1/projects/${project.id}/files?kind=source_pdf`, {
+        method: "POST",
+        credentials: "same-origin",
+        body,
+      });
+      const uploadPayload = await uploadResponse.json();
+      if (!uploadResponse.ok) throw new Error(uploadPayload.detail ?? "Nao foi possivel enviar o PDF.");
+      const query = new URLSearchParams({ quality, source_file_id: uploadPayload.file.id });
+      const jobResponse = await fetch(`/api/v1/projects/${project.id}/processing-jobs?${query}`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      const payload = await jobResponse.json();
+      if (!jobResponse.ok) throw new Error(payload.detail ?? "Nao foi possivel iniciar o processamento.");
+      applyProjectPatch({
         processingJobId: payload.job.id,
-        processingProgress: payload.job.progress,
-        processingLog: payload.job.logs,
+        processingProgress: payload.job.progress ?? 0,
+        processingLog: jobLogLines(payload.job.logs),
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Nao foi possivel processar o PDF.";
-      setProjectProcessing(project.id, { processingStatus: "failed", processingError: detail, processingLog: [detail] });
+      applyProjectPatch({ processingStatus: "failed", processingError: detail, processingLog: [detail] });
       setMessage(detail);
     }
-  }, [project]);
+  }, [project, applyProjectPatch]);
 
   useEffect(() => {
     if (!project || startedPendingPdf.current) return;
@@ -124,39 +133,38 @@ export function ProjectWorkspacePage() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const response = await fetch(`/converter/jobs/${project.processingJobId}`, { cache: "no-store" });
+        const response = await fetch(`/api/v1/processing-jobs/${project.processingJobId}`, { cache: "no-store", credentials: "same-origin" });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail ?? "Nao foi possivel consultar o processamento.");
         if (cancelled) return;
         const job = payload.job;
-        if (job.status === "completed") {
-          const lotCount = Number(job.info?.lotes ?? 0);
-          setProjectProcessing(project.id, {
+        if (job.status === "succeeded") {
+          applyProjectPatch({
             status: "review",
-            lots: lotCount,
             processingStatus: "processed",
             processingProgress: 100,
-            processingLog: job.logs,
+            processingLog: jobLogLines(job.logs),
             processingError: undefined,
-            mapUrl: job.map_url,
+            mapUrl: `/projects/${project.id}/editor`,
             version: Math.max(project.version, 1),
           });
-          setMessage(`Mapa concluido com ${lotCount} lotes. O editor esta pronto.`);
+          setMessage("Mapa concluido. O editor esta pronto para revisao.");
           return;
         }
         if (job.status === "failed") {
-          setProjectProcessing(project.id, {
+          applyProjectPatch({
             processingStatus: "failed",
             processingProgress: job.progress,
-            processingLog: job.logs,
-            processingError: job.error,
+            processingLog: jobLogLines(job.logs),
+            processingError: job.error_message,
           });
-          setMessage(job.error ?? "O processamento falhou.");
+          setMessage(job.error_message ?? "O processamento falhou.");
           return;
         }
-        setProjectProcessing(project.id, {
+        applyProjectPatch({
+          processingStatus: "processing",
           processingProgress: job.progress,
-          processingLog: job.logs,
+          processingLog: jobLogLines(job.logs),
         });
       } catch (error) {
         if (!cancelled) setMessage(error instanceof Error ? error.message : "Falha ao acompanhar o processamento.");
@@ -168,7 +176,17 @@ export function ProjectWorkspacePage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [project?.id, project?.processingJobId, project?.processingStatus, project?.version]);
+  }, [project?.id, project?.processingJobId, project?.processingStatus, project?.version, applyProjectPatch]);
+
+  if (!project) {
+    return (
+      <div className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-6">
+        <h1 className="text-2xl font-medium text-orange-100">Projeto nao encontrado</h1>
+        <p className="mt-2 text-slate-300">Volte para a lista e escolha um projeto existente.</p>
+        <Link to="/app" className="mt-5 inline-flex rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950">Voltar aos projetos</Link>
+      </div>
+    );
+  }
 
   function handlePdfChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
@@ -551,4 +569,13 @@ function projectEditorUrl(project: Project) {
   if (!project.mapUrl) return "/gerador";
   const separator = project.mapUrl.includes("?") ? "&" : "?";
   return `${project.mapUrl}${separator}project_id=${encodeURIComponent(project.id)}`;
+}
+
+function jobLogLines(logs: unknown): string[] {
+  if (!Array.isArray(logs)) return [];
+  return logs.map((entry) => {
+    if (typeof entry === "string") return entry;
+    if (entry && typeof entry === "object" && "message" in entry) return String(entry.message);
+    return String(entry);
+  });
 }

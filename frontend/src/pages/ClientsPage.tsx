@@ -5,7 +5,7 @@ import { SectionHeader } from "../components/SectionHeader";
 import { createClient, useWorkspace } from "../workspace";
 
 type OrganizationsResponse = {
-  organizations: Array<{ id: string; name: string; active: boolean }>;
+  organizations: Array<{ id: string; name: string; active: boolean; project_count: number; contact_count: number }>;
 };
 
 export function ClientsPage() {
@@ -17,8 +17,8 @@ export function ClientsPage() {
   const rows = response.data?.organizations.map((org) => ({
     id: org.id,
     name: org.name,
-    contacts: 0,
-    projects: 0,
+    contacts: org.contact_count,
+    projects: org.project_count,
     access: org.active ? "Ativo" : "Pausado",
   })) ?? workspace.clients;
 

@@ -39,6 +39,7 @@ from .schemas import (
 )
 from .serialization import (
     audit_event_dict,
+    dt,
     file_asset_dict,
     job_dict,
     lot_dict,
@@ -72,6 +73,60 @@ def latest_version(db: DbSession, project_id: str, published_only: bool = False)
     if published_only:
         query = query.filter(ProjectVersion.is_published.is_(True))
     return query.order_by(ProjectVersion.created_at.desc()).first()
+
+
+def project_workspace_dict(db: DbSession, project: Project) -> dict:
+    """Return the persisted project in the shape consumed by the React workspace."""
+    org = db.get(Organization, project.organization_id)
+    version = latest_version(db, project.id)
+    links = db.query(ShareLink).filter(
+        ShareLink.project_id == project.id,
+        ShareLink.active.is_(True),
+    ).all()
+    source = db.query(FileAsset).filter(
+        FileAsset.project_id == project.id,
+        FileAsset.kind == "source_pdf",
+    ).order_by(FileAsset.created_at.desc()).first()
+    job = db.query(ProcessingJob).filter(
+        ProcessingJob.project_id == project.id,
+    ).order_by(ProcessingJob.created_at.desc()).first()
+    job_is_current = bool(job and (not version or job.created_at >= version.created_at))
+    has_password = any(bool(link.password_hash) for link in links)
+    access_mode = project.access_mode
+    if access_mode in {"link", "token"}:
+        visibility = "password" if has_password else "unlisted"
+    elif access_mode in {"private", "password", "unlisted", "public"}:
+        visibility = access_mode
+    else:
+        visibility = "private"
+    data = project_dict(project)
+    data.update({
+        "client": org.name if org else "Cliente nao encontrado",
+        "lots": version.lot_count if version else 0,
+        "pdfName": source.original_name if source else None,
+        "quality": version.quality if version else "balanced",
+        "processingStatus": (
+            "processing" if job_is_current and job.status in {"queued", "running"}
+            else "failed" if job_is_current and job.status == "failed"
+            else "processed" if version
+            else "ready" if source
+            else "empty"
+        ),
+        "processingProgress": job.progress if job_is_current else (100 if version else 0),
+        "processingJobId": job.id if job_is_current and job.status in {"queued", "running"} else None,
+        "processingLog": [
+            entry.get("message", "") if isinstance(entry, dict) else str(entry)
+            for entry in (json.loads(job.logs) if job_is_current and job and job.logs else [])
+        ],
+        "processingError": job.error_message if job_is_current and job else None,
+        "mapUrl": f"/projects/{project.id}/editor" if version else None,
+        "visibility": visibility,
+        "allowEdit": project.client_can_edit,
+        "passwordEnabled": has_password,
+        "updatedAt": dt(project.updated_at),
+        "version": db.query(ProjectVersion).filter(ProjectVersion.project_id == project.id).count(),
+    })
+    return data
 
 
 def require_project_access(db: DbSession, user: User, project_id: str) -> Project:
@@ -113,7 +168,13 @@ def list_organizations(user: User = Depends(current_user), db: DbSession = Depen
         rows = db.query(Organization).order_by(Organization.name).all()
     else:
         rows = db.query(Organization).join(Membership).filter(Membership.user_id == user.id).order_by(Organization.name).all()
-    return {"organizations": [organization_dict(row) for row in rows]}
+    organizations = []
+    for row in rows:
+        data = organization_dict(row)
+        data["project_count"] = db.query(Project).filter(Project.organization_id == row.id).count()
+        data["contact_count"] = db.query(Membership).filter(Membership.organization_id == row.id).count()
+        organizations.append(data)
+    return {"organizations": organizations}
 
 
 @router.post("/organizations", status_code=201)
@@ -148,7 +209,7 @@ def dashboard(user: User = Depends(current_user), db: DbSession = Depends(get_db
             "failed_jobs": failed_jobs,
             "pending_proposals": proposal_count,
         },
-        "recent_projects": [project_dict(project) for project in project_rows],
+        "recent_projects": [project_workspace_dict(db, project) for project in project_rows],
     }
 
 
@@ -161,7 +222,7 @@ def list_projects(organization_id: str | None = None, user: User = Depends(curre
         if not user_can_access_org(db, user, organization_id):
             raise HTTPException(status_code=403, detail="Sem permissao para este cliente.")
         query = query.filter(Project.organization_id == organization_id)
-    return {"projects": [project_dict(row) for row in query.order_by(Project.updated_at.desc()).all()]}
+    return {"projects": [project_workspace_dict(db, row) for row in query.order_by(Project.updated_at.desc()).all()]}
 
 
 @router.post("/projects", status_code=201)
@@ -182,7 +243,7 @@ def create_project(payload: ProjectCreate, user: User = Depends(current_user), d
     audit(db, "project_created", "project", actor=user, target_id=project.id, organization_id=project.organization_id)
     db.commit()
     db.refresh(project)
-    return {"project": project_dict(project)}
+    return {"project": project_workspace_dict(db, project)}
 
 
 @router.get("/projects/{project_id}")
@@ -192,7 +253,7 @@ def get_project(project_id: str, request: Request, user: User = Depends(current_
     version = latest_version(db, project.id)
     links = db.query(ShareLink).filter(ShareLink.project_id == project.id).order_by(ShareLink.created_at.desc()).all()
     return {
-        "project": project_dict(project),
+        "project": project_workspace_dict(db, project),
         "organization": organization_dict(org),
         "latest_version": version_dict(version),
         "share_links": [share_link_dict(link, link_url(request, link, project)) for link in links],
@@ -208,7 +269,7 @@ def update_project(project_id: str, payload: ProjectUpdate, user: User = Depends
     audit(db, "project_updated", "project", actor=user, target_id=project.id, organization_id=project.organization_id, details=json.dumps(changes, ensure_ascii=False))
     db.commit()
     db.refresh(project)
-    return {"project": project_dict(project)}
+    return {"project": project_workspace_dict(db, project)}
 
 
 @router.post("/projects/{project_id}/files", status_code=201)
