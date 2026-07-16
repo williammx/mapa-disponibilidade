@@ -18,7 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session as DbSession
 
 import pdf_to_map
-from auth import audit, clear_session, current_user, hash_token, normalize_email, password_hash, require_platform_admin, set_session
+from auth import COOKIE_NAME, audit, clear_session, current_user, hash_token, normalize_email, password_hash, require_platform_admin, set_session
 from database import Base, engine, get_db
 from models import Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
 from app_v1.api import router as api_v1_router
@@ -167,6 +167,23 @@ def can_manage_organization(db: DbSession, user: User, organization_id: str) -> 
         return True
     membership = organization_membership(db, user.id, organization_id)
     return bool(membership and membership.role == "client_admin")
+
+
+def can_access_organization(db: DbSession, user: User, organization_id: str) -> bool:
+    if user.platform_role in {"platform_admin", "operator"}:
+        return True
+    return organization_membership(db, user.id, organization_id) is not None
+
+
+def authenticated_request_user(request: Request, db: DbSession) -> User | None:
+    raw_token = request.cookies.get(COOKIE_NAME)
+    if not raw_token:
+        return None
+    session = db.query(Session).filter(Session.token_hash == hash_token(raw_token)).first()
+    if not session or session.expires_at <= utcnow():
+        return None
+    user = db.get(User, session.user_id)
+    return user if user and user.active else None
 
 
 @app.get("/health")
@@ -566,16 +583,22 @@ def public_project_map_v2(slug: str, db: DbSession = Depends(get_db)):
 
 
 @app.get("/s/{token}")
-def shared_project_map(token: str, db: DbSession = Depends(get_db)):
+def shared_project_map(token: str, request: Request, db: DbSession = Depends(get_db)):
     link = db.query(ShareLink).filter(ShareLink.token == token, ShareLink.active.is_(True)).first()
     if not link:
         raise HTTPException(status_code=404, detail="Link nao encontrado.")
     project = db.get(Project, link.project_id)
+    if link.access_mode == "private":
+        user = authenticated_request_user(request, db)
+        if not user:
+            return RedirectResponse(url=f"/entrar?next=/s/{token}", status_code=303)
+        if not can_access_organization(db, user, project.organization_id):
+            raise HTTPException(status_code=403, detail="Este usuario nao possui acesso ao projeto.")
     version = latest_version(db, project.id, published_only=True)
     if not version:
         raise HTTPException(status_code=404, detail="Mapa nao publicado.")
     if link.password_hash:
-        return HTMLResponse('<form method="post" style="font:16px system-ui;max-width:360px;margin:15vh auto"><h1>Acesso protegido</h1><input name="password" type="password" placeholder="Senha" required style="width:100%;padding:12px"><button style="margin-top:12px;padding:12px">Abrir mapa</button></form>')
+        return HTMLResponse('<form method="post" style="font:16px system-ui;max-width:360px;margin:15vh auto"><h1>Acesso protegido</h1><input name="password" type="password" autocomplete="current-password" placeholder="Senha" required style="width:100%;padding:12px"><button style="margin-top:12px;padding:12px">Abrir mapa</button></form>')
     return shared_map_response(project, version)
 
 

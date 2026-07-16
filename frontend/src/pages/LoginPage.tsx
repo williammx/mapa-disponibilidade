@@ -1,11 +1,12 @@
 import { ArrowRight, LockKey } from "@phosphor-icons/react";
 import { FormEvent, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { apiRequest } from "../api";
 import { BrandLogo } from "../components/BrandLogo";
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -21,14 +22,14 @@ export function LoginPage() {
     setLoading(true);
     try {
       if (import.meta.env.DEV && import.meta.env.VITE_USE_BACKEND !== "true") {
-        navigate("/app");
+        navigate(safeNextPath(searchParams.get("next")));
         return;
       }
       await apiRequest("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      navigate("/app");
+      navigate(safeNextPath(searchParams.get("next")));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel entrar.");
     } finally {
@@ -88,4 +89,8 @@ export function LoginPage() {
       </section>
     </main>
   );
+}
+
+function safeNextPath(value: string | null) {
+  return value && value.startsWith("/") && !value.startsWith("//") ? value : "/app";
 }
