@@ -178,6 +178,14 @@ export function ProjectWorkspacePage() {
     };
   }, [project?.id, project?.processingJobId, project?.processingStatus, project?.version, applyProjectPatch]);
 
+  if (!project && response.loading) {
+    return (
+      <div className="rounded-[8px] border border-white/10 bg-white/4 p-6" role="status">
+        <p className="text-sm text-slate-400">Carregando projeto...</p>
+      </div>
+    );
+  }
+
   if (!project) {
     return (
       <div className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-6">
