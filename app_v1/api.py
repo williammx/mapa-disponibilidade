@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session as DbSession
 
-from auth import audit, current_user, hash_token, password_hash
+from auth import audit, current_user, hash_token, normalize_email, password_hash
 from database import get_db
 from models import (
     AuditEvent,
@@ -30,6 +30,8 @@ from .schemas import (
     LotBatchPatch,
     LotPatch,
     OrganizationCreate,
+    OrganizationInvite,
+    OrganizationUpdate,
     ProjectCreate,
     ProjectPublishPayload,
     ProjectUpdate,
@@ -192,6 +194,96 @@ def create_organization(payload: OrganizationCreate, user: User = Depends(curren
     db.commit()
     db.refresh(org)
     return {"organization": organization_dict(org)}
+
+
+@router.get("/organizations/{organization_id}")
+def get_organization(organization_id: str, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    if not user_can_access_org(db, user, organization_id):
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado.")
+    org = db.get(Organization, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado.")
+    member_rows = (
+        db.query(Membership, User)
+        .join(User, User.id == Membership.user_id)
+        .filter(Membership.organization_id == organization_id)
+        .order_by(User.name)
+        .all()
+    )
+    projects = db.query(Project).filter(Project.organization_id == organization_id).order_by(Project.updated_at.desc()).all()
+    return {
+        "organization": organization_dict(org),
+        "members": [
+            {"membership_id": membership.id, "role": membership.role, "user": user_dict(member)}
+            for membership, member in member_rows
+        ],
+        "projects": [project_workspace_dict(db, project) for project in projects],
+    }
+
+
+@router.patch("/organizations/{organization_id}")
+def update_organization(organization_id: str, payload: OrganizationUpdate, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    if not user_can_manage_org(db, user, organization_id):
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado.")
+    org = db.get(Organization, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado.")
+    changes = payload.model_dump(exclude_unset=True)
+    for key, value in changes.items():
+        setattr(org, key, value.strip() if isinstance(value, str) else value)
+    audit(db, "organization_updated", "organization", actor=user, target_id=org.id, organization_id=org.id, details=json.dumps(changes, ensure_ascii=False))
+    db.commit()
+    db.refresh(org)
+    return {"organization": organization_dict(org)}
+
+
+@router.post("/organizations/{organization_id}/invitations", status_code=201)
+def invite_organization_user(organization_id: str, payload: OrganizationInvite, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    if not user_can_manage_org(db, user, organization_id):
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado.")
+    org = db.get(Organization, organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado.")
+    email = normalize_email(payload.email)
+    member = db.query(User).filter(User.email == email).first()
+    temporary_password = None
+    if not member:
+        temporary_password = secrets.token_urlsafe(12)
+        member = User(
+            name=payload.name.strip(),
+            email=email,
+            password_hash=password_hash.hash(temporary_password),
+            platform_role="none",
+            must_change_password=True,
+        )
+        db.add(member)
+        db.flush()
+    elif not member.active:
+        raise HTTPException(status_code=409, detail="Este usuario esta bloqueado.")
+    membership = db.query(Membership).filter(
+        Membership.user_id == member.id,
+        Membership.organization_id == organization_id,
+    ).first()
+    if membership:
+        raise HTTPException(status_code=409, detail="Usuario ja possui acesso a este cliente.")
+    membership = Membership(user_id=member.id, organization_id=organization_id, role=payload.role)
+    db.add(membership)
+    db.flush()
+    audit(
+        db,
+        "organization_user_invited",
+        "membership",
+        actor=user,
+        target_id=membership.id,
+        organization_id=organization_id,
+        details=json.dumps({"email": email, "role": payload.role}, ensure_ascii=False),
+    )
+    db.commit()
+    return {
+        "membership": {"id": membership.id, "role": membership.role, "user": user_dict(member)},
+        "temporary_password": temporary_password,
+        "login_url": "/entrar",
+    }
 
 
 @router.get("/dashboard")
@@ -450,7 +542,7 @@ def publish_version(version_id: str, payload: PublishVersionPayload, user: User 
 @router.post("/projects/{project_id}/publish")
 def publish_project_delivery(project_id: str, payload: ProjectPublishPayload, request: Request,
                              user: User = Depends(current_user), db: DbSession = Depends(get_db)):
-    """Publish the latest map and rotate its client link atomically."""
+    """Publish the latest map while keeping the current client URL stable."""
     project = require_project_manager(db, user, project_id)
     version = latest_version(db, project.id)
     if not version:
@@ -472,7 +564,6 @@ def publish_project_delivery(project_id: str, payload: ProjectPublishPayload, re
         raise HTTPException(status_code=422, detail="Defina uma senha para proteger o link.")
 
     db.query(ProjectVersion).filter(ProjectVersion.project_id == project.id).update({"is_published": False})
-    db.query(ShareLink).filter(ShareLink.project_id == project.id, ShareLink.active.is_(True)).update({"active": False})
 
     version.is_published = True
     version.status = "published"
@@ -481,21 +572,31 @@ def publish_project_delivery(project_id: str, payload: ProjectPublishPayload, re
     project.client_can_edit = payload.allow_edit
 
     link_access_mode = "token" if payload.access_mode == "unlisted" else payload.access_mode
-    token = None if payload.access_mode == "public" else secrets.token_urlsafe(18)
-    link = ShareLink(
-        project_id=project.id,
-        token=token,
-        token_hash=hash_token(token) if token else None,
-        password_hash=(
-            password_hash.hash(payload.password)
-            if payload.password
-            else current_link.password_hash if payload.access_mode == "password" and current_link else None
-        ),
-        access_mode=link_access_mode,
-        allow_edit=payload.allow_edit,
-        active=True,
+    link = current_link or ShareLink(project_id=project.id, active=True)
+    if not current_link:
+        db.add(link)
+    # A token URL remains the same when access, password or edit permissions change.
+    # Only a switch to/from the public slug requires changing the URL shape.
+    if payload.access_mode == "public":
+        link.token = None
+        link.token_hash = None
+    elif not link.token:
+        link.token = secrets.token_urlsafe(18)
+        link.token_hash = hash_token(link.token)
+    link.access_mode = link_access_mode
+    link.password_hash = (
+        password_hash.hash(payload.password)
+        if payload.password
+        else link.password_hash if payload.access_mode == "password" else None
     )
-    db.add(link)
+    link.allow_edit = payload.allow_edit
+    link.active = True
+    if current_link:
+        db.query(ShareLink).filter(
+            ShareLink.project_id == project.id,
+            ShareLink.active.is_(True),
+            ShareLink.id != current_link.id,
+        ).update({"active": False})
     db.flush()
     audit(
         db,

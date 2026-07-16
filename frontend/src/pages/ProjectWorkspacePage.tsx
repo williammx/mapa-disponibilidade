@@ -10,6 +10,7 @@ const tabs = ["Visao geral", "Mapa e editor", "Validacao", "Versoes", "Publicaca
 type Tab = (typeof tabs)[number];
 type ShareLink = { id: string; url: string | null; has_password: boolean; access_mode: string; allow_edit: boolean; active: boolean };
 type PublishResponse = { project: Project; share_link: ShareLink };
+type EditProposal = { id: string; title: string; summary: string | null; status: string; changes: { lots?: unknown[] }; created_at: string };
 
 export function ProjectWorkspacePage() {
   const { projectId } = useParams();
@@ -29,9 +30,9 @@ export function ProjectWorkspacePage() {
   const project = useMemo(() => baseProject ? { ...baseProject, ...runtimePatch } : undefined, [baseProject, runtimePatch]);
   const shareUrl = useMemo(() => {
     if (!project) return "";
+    if (publishedShareUrl) return publishedShareUrl;
     const backendUrl = response.data?.share_links.find((link) => link.active)?.url;
     if (backendUrl) return backendUrl;
-    if (publishedShareUrl) return publishedShareUrl;
     if (!isLocalDemoMode || project.status !== "published") return "";
     const path = sharePath(project);
     return path.startsWith("http") ? path : `${window.location.origin}${path}`;
@@ -301,7 +302,7 @@ export function ProjectWorkspacePage() {
 
       {activeTab === "Visao geral" ? <Overview project={project} onSubmit={handleDetailsSubmit} /> : null}
       {activeTab === "Mapa e editor" ? <Editor project={project} shareUrl={shareUrl} onPdfChange={handlePdfChange} onQualityChange={handleQualityChange} onRetry={() => document.getElementById("workspace-pdf")?.click()} /> : null}
-      {activeTab === "Validacao" ? <Validation /> : null}
+      {activeTab === "Validacao" ? <Validation projectId={project.id} /> : null}
       {activeTab === "Versoes" ? <Versions project={project} onPublish={publish} /> : null}
       {activeTab === "Publicacao" ? <Publication project={project} shareUrl={shareUrl} onSubmit={handleAccessSubmit} onCopy={copyLink} onPublish={publish} /> : null}
       {activeTab === "Acessos" ? <Access project={project} shareUrl={shareUrl} /> : null}
@@ -459,23 +460,68 @@ function processingLabel(status: Project["processingStatus"]) {
   return "Sem PDF";
 }
 
-function Validation() {
+function Validation({ projectId }: { projectId: string }) {
+  const response = useApi<{ edit_proposals: EditProposal[] }>(`/api/v1/projects/${projectId}/edit-proposals`);
+  const [statusPatch, setStatusPatch] = useState<Record<string, string>>({});
+
+  async function decide(proposalId: string, decision: "accept" | "reject") {
+    try {
+      const payload = await apiRequest<{ edit_proposal: EditProposal }>(`/api/v1/edit-proposals/${proposalId}/${decision}`, {
+        method: "POST",
+        body: JSON.stringify({ notes: null }),
+      });
+      setStatusPatch((current) => ({ ...current, [proposalId]: payload.edit_proposal.status }));
+    } catch {
+      setStatusPatch((current) => ({ ...current, [proposalId]: "erro" }));
+    }
+  }
+
   return (
-    <section className="grid gap-4 md:grid-cols-2">
-      {[
-        ["Lotes sem nome", "12 itens para revisar", false],
-        ["Geometrias invalidas", "Nenhum erro critico", true],
-        ["Possiveis lotes agrupados", "3 pontos suspeitos", false],
-        ["Sobreposicoes", "Dentro do limite esperado", true],
-      ].map(([label, detail, ok]) => (
-        <div key={String(label)} className="rounded-[8px] border border-white/10 p-5">
-          <div className="flex items-center gap-3">
-            {ok ? <CheckCircle className="text-emerald-300" size={22} weight="fill" /> : <WarningCircle className="text-orange-300" size={22} weight="bold" />}
-            <h3 className="font-medium">{label}</h3>
+    <section className="space-y-7">
+      <div className="grid gap-4 md:grid-cols-2">
+        {[
+          ["Lotes sem nome", "Revise os itens sem identificacao no editor", false],
+          ["Geometrias invalidas", "Consulte o relatorio da versao atual", true],
+          ["Possiveis lotes agrupados", "Verifique quadras com areas muito grandes", false],
+          ["Sobreposicoes", "Valide os limites antes de publicar", true],
+        ].map(([label, detail, ok]) => (
+          <div key={String(label)} className="rounded-[8px] border border-white/10 p-5">
+            <div className="flex items-center gap-3">
+              {ok ? <CheckCircle className="text-emerald-300" size={22} weight="fill" /> : <WarningCircle className="text-orange-300" size={22} weight="bold" />}
+              <h3 className="font-medium">{label}</h3>
+            </div>
+            <p className="mt-3 text-sm text-slate-400">{detail}</p>
           </div>
-          <p className="mt-3 text-sm text-slate-400">{detail}</p>
+        ))}
+      </div>
+      <div className="rounded-[8px] border border-white/10">
+        <div className="border-b border-white/10 p-5">
+          <h2 className="text-xl font-medium">Propostas enviadas pelo cliente</h2>
+          <p className="mt-2 text-sm text-slate-400">Alteracoes do cliente ficam separadas da versao publicada ate sua decisao.</p>
         </div>
-      ))}
+        {response.data?.edit_proposals.length ? (
+          <div className="divide-y divide-white/8">
+            {response.data.edit_proposals.map((proposal) => {
+              const proposalStatus = statusPatch[proposal.id] ?? proposal.status;
+              return (
+                <article key={proposal.id} className="grid gap-4 p-5 md:grid-cols-[1fr_auto] md:items-center">
+                  <div>
+                    <p className="font-medium">{proposal.title}</p>
+                    <p className="mt-1 text-sm text-slate-400">{proposal.summary || "Sem observacoes."} · {proposal.changes.lots?.length ?? 0} lotes no arquivo proposto</p>
+                    <p className="mt-2 text-xs uppercase tracking-[0.14em] text-emerald-300">{proposalStatus}</p>
+                  </div>
+                  {proposalStatus === "pending" ? (
+                    <div className="flex gap-2">
+                      <button onClick={() => decide(proposal.id, "reject")} className="rounded-[8px] border border-white/12 px-3 py-2 text-sm">Recusar</button>
+                      <button onClick={() => decide(proposal.id, "accept")} className="rounded-[8px] bg-emerald-400 px-3 py-2 text-sm font-medium text-slate-950">Aceitar para revisao</button>
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        ) : <p className="p-6 text-sm text-slate-400">{response.loading ? "Carregando propostas..." : "Nenhuma proposta enviada."}</p>}
+      </div>
     </section>
   );
 }
@@ -498,6 +544,8 @@ function Versions({ project, onPublish }: { project: Project; onPublish: () => v
 }
 
 function Publication({ project, shareUrl, onSubmit, onCopy, onPublish }: { project: Project; shareUrl: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onCopy: () => void; onPublish: (form?: HTMLFormElement) => void }) {
+  const [visibility, setVisibility] = useState<Visibility>(project.visibility);
+  const [allowEdit, setAllowEdit] = useState(project.allowEdit);
   return (
     <section className="grid gap-6 xl:grid-cols-[1fr_420px]">
       <form onSubmit={onSubmit} className="rounded-[8px] border border-white/10 bg-white/4 p-6">
@@ -506,25 +554,26 @@ function Publication({ project, shareUrl, onSubmit, onCopy, onPublish }: { proje
         <div className="mt-7 grid gap-5">
           <label>
             <span className="mb-2 block text-sm font-medium text-slate-300">Visibilidade</span>
-            <select name="visibility" defaultValue={project.visibility} className="w-full rounded-[8px] border border-white/12 bg-[#091217] px-4 py-3 outline-none focus:border-emerald-300">
+            <select name="visibility" value={visibility} onChange={(event) => setVisibility(event.currentTarget.value as Visibility)} className="w-full rounded-[8px] border border-white/12 bg-[#091217] px-4 py-3 outline-none focus:border-emerald-300">
               <option value="private">Privado por login</option>
               <option value="password">Link protegido por senha</option>
               <option value="unlisted">Por link sem senha</option>
               <option value="public">Publico por URL</option>
             </select>
           </label>
-          <Field name="password" label="Senha opcional" type="password" autoComplete="new-password" placeholder="Defina ou atualize a senha" />
+          {visibility === "password" ? <Field name="password" label={project.passwordEnabled ? "Nova senha (deixe vazio para manter a atual)" : "Senha do link"} type="password" autoComplete="new-password" placeholder={project.passwordEnabled ? "Manter senha atual" : "Defina a senha de acesso"} /> : null}
           <label className="flex items-center justify-between gap-5 rounded-[8px] border border-white/10 p-4">
             <span>
               <span className="block font-medium">Permitir edicao pelo cliente</span>
               <span className="mt-1 block text-sm text-slate-400">Quando ligado, o cliente edita uma copia e envia proposta para aprovacao interna.</span>
             </span>
-            <input name="allowEdit" type="checkbox" defaultChecked={project.allowEdit} className="size-5 accent-emerald-400" />
+            <input name="allowEdit" type="checkbox" checked={allowEdit} onChange={(event) => setAllowEdit(event.currentTarget.checked)} className="size-5 accent-emerald-400" />
           </label>
+          <p className="text-xs leading-5 text-slate-500">Salvar atualiza o acesso sem trocar o endereco atual do link. Uma nova URL so e usada ao alternar entre URL publica e link controlado.</p>
           <div className="flex flex-wrap gap-3">
             <button className="inline-flex items-center gap-2 rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950">
               <FloppyDisk size={17} weight="bold" />
-              Salvar acesso
+              {project.status === "published" ? "Salvar e atualizar link" : "Salvar acesso"}
             </button>
             <button type="button" onClick={(event) => onPublish(event.currentTarget.form ?? undefined)} className="inline-flex items-center gap-2 rounded-[8px] border border-white/12 px-4 py-3 text-sm font-medium">
               <UploadSimple size={17} weight="bold" />
@@ -592,7 +641,7 @@ function SharePanel({ project, shareUrl, onCopy }: { project: Project; shareUrl:
       <div className="rounded-[8px] border border-white/10 p-5">
         <h3 className="font-medium">Checklist</h3>
         <div className="mt-4 space-y-3 text-sm">
-          <Row icon={<Eye size={16} weight="bold" />} label="Visualizador somente leitura" ok={!project.allowEdit} />
+          <Row icon={<Eye size={16} weight="bold" />} label={project.allowEdit ? "Edicao por proposta habilitada" : "Visualizador somente leitura"} ok />
           <Row icon={<LockKey size={16} weight="bold" />} label="Senha configuravel" ok={project.visibility !== "password" || project.passwordEnabled} />
           <Row icon={<CheckCircle size={16} weight="fill" />} label="Versao publicada" ok={project.status === "published"} />
         </div>

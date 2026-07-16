@@ -9,6 +9,17 @@ class OrganizationCreate(BaseModel):
     slug: str = Field(min_length=3, max_length=80)
 
 
+class OrganizationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    active: bool | None = None
+
+
+class OrganizationInvite(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    email: str = Field(min_length=5, max_length=320)
+    role: str = Field(default="client_member", pattern=r"^(client_admin|client_member)$")
+
+
 class ProjectCreate(BaseModel):
     organization_id: str
     name: str = Field(min_length=2, max_length=180)
@@ -58,6 +69,12 @@ class EditProposalCreate(BaseModel):
     summary: str | None = Field(default=None, max_length=4000)
     changes: dict[str, Any]
     share_link_id: str | None = None
+
+
+class SharedEditProposalCreate(BaseModel):
+    title: str = Field(default="Alteracoes no mapa", min_length=2, max_length=180)
+    summary: str | None = Field(default=None, max_length=4000)
+    changes: dict[str, Any]
 
 
 class ProposalDecision(BaseModel):

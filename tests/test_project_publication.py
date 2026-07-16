@@ -24,7 +24,7 @@ def make_request() -> Request:
     })
 
 
-def test_publish_project_creates_one_working_delivery_link_and_rotates_old_links():
+def test_publish_project_keeps_the_existing_delivery_url_stable():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
@@ -57,9 +57,9 @@ def test_publish_project_creates_one_working_delivery_link_and_rotates_old_links
         assert project.status == "published"
         assert project.access_mode == "unlisted"
         assert version.is_published is True
-        assert old_link.active is False
+        assert old_link.active is True
         assert len(active_links) == 1
-        assert result["share_link"]["url"].startswith("https://map.example.com/s/")
+        assert result["share_link"]["url"] == "https://map.example.com/s/old-token"
     finally:
         db.close()
         engine.dispose()

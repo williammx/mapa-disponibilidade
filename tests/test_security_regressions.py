@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from api import client_portal_spa, shared_project_map, unlock_shared_project
+from api import client_portal_spa, shared_map_response, shared_project_map, unlock_shared_project
 from app_v1.api import create_processing_job
 from auth import password_hash
 from database import Base
@@ -114,3 +114,37 @@ def test_private_password_link_still_requires_an_authenticated_member(db):
         unlock_shared_project(link.token, request(f"/s/{link.token}"), "senha-segura", db)
 
     assert error.value.status_code == 403
+
+
+def test_client_edit_mode_includes_editor_and_proposal_action(db, tmp_path):
+    _, _, project = make_project(db, "editavel")
+    map_path = tmp_path / "map.html"
+    map_path.write_text(
+        '<html><head></head><body><button id="edt">Editar</button><script>window.getMapaPayload=function(){return {lots:[]}}</script></body></html>',
+        encoding="utf-8",
+    )
+    version = db.query(ProjectVersion).filter(ProjectVersion.project_id == project.id).first()
+    version.map_html_path = str(map_path)
+    link = ShareLink(project_id=project.id, token="edit-token", token_hash="3" * 64, allow_edit=True)
+    db.add(link)
+    db.commit()
+
+    response = shared_map_response(project, version, allow_edit=True, link=link)
+
+    html = response.body.decode("utf-8")
+    assert "Edicao do cliente" in html
+    assert f"/api/shared-edit-proposals/{link.id}" in html
+    assert "shared-viewer" not in html
+
+
+def test_replaced_link_redirects_to_current_delivery(db):
+    _, _, project = make_project(db, "substituido")
+    old = ShareLink(project_id=project.id, token="old-token", token_hash="4" * 64, active=False)
+    current = ShareLink(project_id=project.id, token="current-token", token_hash="5" * 64, active=True)
+    db.add_all([old, current])
+    db.commit()
+
+    response = shared_project_map(old.token, request(f"/s/{old.token}"), db)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/s/current-token"

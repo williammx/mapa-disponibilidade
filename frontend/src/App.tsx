@@ -4,6 +4,7 @@ import { LandingPage } from "./pages/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ClientsPage } from "./pages/ClientsPage";
+import { ClientDetailPage } from "./pages/ClientDetailPage";
 import { ActivityPage } from "./pages/ActivityPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { PreferencesPage } from "./pages/PreferencesPage";
@@ -26,6 +27,7 @@ export function App() {
         <Route path="/app" element={<AppShell />}>
           <Route index element={<DashboardPage />} />
           <Route path="clientes" element={<ClientsPage />} />
+          <Route path="clientes/:organizationId" element={<ClientDetailPage />} />
           <Route path="atividade" element={<ActivityPage />} />
           <Route path="perfil" element={<ProfilePage />} />
           <Route path="preferencias" element={<PreferencesPage />} />

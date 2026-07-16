@@ -20,8 +20,9 @@ from sqlalchemy.orm import Session as DbSession
 import pdf_to_map
 from auth import COOKIE_NAME, audit, clear_session, current_user, hash_token, normalize_email, password_hash, require_platform_admin, set_session
 from database import Base, engine, get_db
-from models import Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
+from models import AuditEvent, EditProposal, Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
 from app_v1.api import router as api_v1_router
+from app_v1.schemas import SharedEditProposalCreate
 
 app = FastAPI(title="NexoLote")
 app.include_router(api_v1_router)
@@ -560,15 +561,61 @@ def create_share_link(project_id: str, payload: ShareLinkPayload, user: User = D
     return {"url": f"/s/{token}", "has_password": bool(payload.password)}
 
 
-def shared_map_response(project: Project, version: ProjectVersion):
+def share_unlock_cookie_name(link: ShareLink) -> str:
+    return f"nexolote_share_{link.id.replace('-', '')[:20]}"
+
+
+def share_unlock_value(link: ShareLink) -> str:
+    return hash_token(f"{link.id}:{link.token or ''}:{link.password_hash or ''}")
+
+
+def share_is_unlocked(request: Request, link: ShareLink) -> bool:
+    value = request.cookies.get(share_unlock_cookie_name(link), "")
+    return bool(value and secrets.compare_digest(value, share_unlock_value(link)))
+
+
+def client_edit_injection(link: ShareLink) -> str:
+    endpoint = json.dumps(f"/api/shared-edit-proposals/{link.id}")
+    return f"""
+<style id="client-edit-ui">
+#client-edit-bar{{position:fixed;z-index:90;right:18px;bottom:18px;width:min(360px,calc(100vw - 36px));padding:15px;border:1px solid #34444d;border-radius:8px;background:#0b151b;color:#edf5f1;box-shadow:0 18px 60px rgba(0,0,0,.4);font:13px/1.45 system-ui}}
+#client-edit-bar strong{{display:block;font-size:14px;font-weight:600}}#client-edit-bar p{{margin:5px 0 11px;color:#9caeb6}}
+#client-edit-bar textarea{{box-sizing:border-box;width:100%;min-height:62px;padding:9px;border:1px solid #3b4c55;border-radius:6px;background:#071014;color:#eef5f1;resize:vertical}}
+#client-edit-bar button{{width:100%;height:40px;margin-top:9px;border:0;border-radius:6px;background:#35d894;color:#06291b;font-weight:600;cursor:pointer}}
+#client-edit-bar button:disabled{{cursor:wait;opacity:.65}}#client-edit-feedback{{min-height:18px;margin-top:8px;color:#9de9c7}}
+</style>
+<script id="client-edit-script">
+window.addEventListener('DOMContentLoaded',function(){{
+  var editButton=document.getElementById('edt');
+  if(editButton&&!editButton.classList.contains('on'))editButton.click();
+  var bar=document.createElement('aside');bar.id='client-edit-bar';
+  bar.innerHTML='<strong>Edicao do cliente</strong><p>As alteracoes viram uma proposta. O mapa publicado nao e alterado automaticamente.</p><textarea id="client-edit-summary" placeholder="Descreva o que foi alterado (opcional)"></textarea><button id="client-edit-submit" type="button">Enviar alteracoes para aprovacao</button><div id="client-edit-feedback" role="status"></div>';
+  document.body.appendChild(bar);
+  document.getElementById('client-edit-submit').onclick=async function(){{
+    var button=this,feedback=document.getElementById('client-edit-feedback');
+    if(typeof window.getMapaPayload!=='function'){{feedback.textContent='Nao foi possivel ler as alteracoes do mapa.';return;}}
+    var map=window.getMapaPayload();button.disabled=true;button.textContent='Enviando...';feedback.textContent='';
+    try{{
+      var response=await fetch({endpoint},{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{title:'Alteracoes enviadas pelo cliente',summary:document.getElementById('client-edit-summary').value||null,changes:{{lots:map.lots,settings:{{opacity:map.opacity,stroke_width:map.stroke_width,label_mode:map.label_mode}}}}}})}});
+      var data=await response.json();if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:'Nao foi possivel enviar a proposta.');
+      feedback.textContent='Proposta enviada. A equipe ja pode revisar as alteracoes.';button.textContent='Proposta enviada';
+    }}catch(error){{feedback.textContent=error.message;button.disabled=false;button.textContent='Tentar enviar novamente';}}
+  }};
+}});
+</script>
+"""
+
+
+def shared_map_response(project: Project, version: ProjectVersion, allow_edit: bool = False, link: ShareLink | None = None):
     if not os.path.isfile(version.map_html_path):
         raise HTTPException(status_code=404, detail="Arquivo do mapa nao encontrado.")
-    if project.client_can_edit:
-        return FileResponse(version.map_html_path, media_type="text/html")
     with open(version.map_html_path, "r", encoding="utf-8") as map_file:
         html = map_file.read()
-    viewer_guard = """<style id=\"shared-viewer\">#side,#sideToggle,#edit,#editor,#draft,#vertices{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');});</script>"""
-    html = html.replace("</head>", viewer_guard + "</head>", 1)
+    if allow_edit and link:
+        html = html.replace("</head>", client_edit_injection(link) + "</head>", 1)
+    else:
+        viewer_guard = """<style id=\"shared-viewer\">#side,#sideToggle,#edit,#editor,#draft,#vertices{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');});</script>"""
+        html = html.replace("</head>", viewer_guard + "</head>", 1)
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
@@ -595,7 +642,12 @@ def public_project_map(slug: str, db: DbSession = Depends(get_db)):
     version = latest_version(db, project.id, published_only=True)
     if not version:
         raise HTTPException(status_code=404, detail="Mapa nao encontrado.")
-    return shared_map_response(project, version)
+    link = db.query(ShareLink).filter(
+        ShareLink.project_id == project.id,
+        ShareLink.active.is_(True),
+        ShareLink.access_mode == "public",
+    ).order_by(ShareLink.created_at.desc()).first()
+    return shared_map_response(project, version, allow_edit=bool(link and link.allow_edit), link=link)
 
 
 @app.get("/mapas/{slug}")
@@ -605,9 +657,27 @@ def public_project_map_v2(slug: str, db: DbSession = Depends(get_db)):
 
 @app.get("/s/{token}")
 def shared_project_map(token: str, request: Request, db: DbSession = Depends(get_db)):
-    link = db.query(ShareLink).filter(ShareLink.token == token, ShareLink.active.is_(True)).first()
+    link = db.query(ShareLink).filter(ShareLink.token == token).first()
     if not link:
         raise HTTPException(status_code=404, detail="Link nao encontrado.")
+    if not link.active:
+        explicitly_revoked = db.query(AuditEvent).filter(
+            AuditEvent.action == "share_link_revoked",
+            AuditEvent.target_id == link.id,
+        ).first()
+        replacement = db.query(ShareLink).filter(
+            ShareLink.project_id == link.project_id,
+            ShareLink.active.is_(True),
+        ).order_by(ShareLink.created_at.desc()).first()
+        if replacement and not explicitly_revoked:
+            project = db.get(Project, link.project_id)
+            destination = (
+                f"/mapas/{project.slug}"
+                if replacement.access_mode == "public" or not replacement.token
+                else f"/s/{replacement.token}"
+            )
+            return RedirectResponse(destination, status_code=307)
+        raise HTTPException(status_code=410, detail="Este link foi revogado.")
     if link.expires_at and link.expires_at <= utcnow():
         raise HTTPException(status_code=410, detail="Este link expirou.")
     project = db.get(Project, link.project_id)
@@ -622,12 +692,12 @@ def shared_project_map(token: str, request: Request, db: DbSession = Depends(get
     version = latest_version(db, project.id, published_only=True)
     if not version:
         raise HTTPException(status_code=404, detail="Mapa nao publicado.")
-    if link.password_hash:
+    if link.password_hash and not share_is_unlocked(request, link):
         return HTMLResponse('<form method="post" style="font:16px system-ui;max-width:360px;margin:15vh auto"><h1>Acesso protegido</h1><input name="password" type="password" autocomplete="current-password" placeholder="Senha" required style="width:100%;padding:12px"><button style="margin-top:12px;padding:12px">Abrir mapa</button></form>')
     link.last_used_at = utcnow()
     link.access_count += 1
     db.commit()
-    return shared_map_response(project, version)
+    return shared_map_response(project, version, allow_edit=link.allow_edit, link=link)
 
 
 @app.post("/s/{token}")
@@ -652,7 +722,49 @@ def unlock_shared_project(token: str, request: Request, password: str = Form(...
     link.last_used_at = utcnow()
     link.access_count += 1
     db.commit()
-    return shared_map_response(project, version)
+    response = shared_map_response(project, version, allow_edit=link.allow_edit, link=link)
+    response.set_cookie(
+        share_unlock_cookie_name(link),
+        share_unlock_value(link),
+        max_age=8 * 3600,
+        httponly=True,
+        secure=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/shared-edit-proposals/{share_link_id}", status_code=201)
+def create_shared_edit_proposal(share_link_id: str, payload: SharedEditProposalCreate, request: Request, db: DbSession = Depends(get_db)):
+    link = db.get(ShareLink, share_link_id)
+    if not link or not link.active or not link.allow_edit:
+        raise HTTPException(status_code=404, detail="Edicao nao esta disponivel para este link.")
+    if link.expires_at and link.expires_at <= utcnow():
+        raise HTTPException(status_code=410, detail="Este link expirou.")
+    project = db.get(Project, link.project_id)
+    version = latest_version(db, link.project_id, published_only=True)
+    if not project or project.status != "published" or not version:
+        raise HTTPException(status_code=404, detail="Mapa nao publicado.")
+    actor = authenticated_request_user(request, db)
+    if link.access_mode == "private" and (not actor or not can_access_organization(db, actor, project.organization_id)):
+        raise HTTPException(status_code=403, detail="Entre com um usuario autorizado para enviar alteracoes.")
+    if link.password_hash and not share_is_unlocked(request, link):
+        raise HTTPException(status_code=403, detail="Desbloqueie o mapa com a senha antes de enviar alteracoes.")
+    proposal = EditProposal(
+        project_id=project.id,
+        base_project_version_id=version.id,
+        proposed_by_user_id=actor.id if actor else None,
+        share_link_id=link.id,
+        title=payload.title.strip(),
+        summary=payload.summary,
+        changes_json=json.dumps(payload.changes, ensure_ascii=False),
+    )
+    db.add(proposal)
+    db.flush()
+    audit(db, "edit_proposal_created", "edit_proposal", actor=actor, target_id=proposal.id, organization_id=project.organization_id)
+    db.commit()
+    return {"proposal": {"id": proposal.id, "status": proposal.status, "created_at": proposal.created_at.isoformat()}}
 
 
 @app.get("/api/activity")
