@@ -28,6 +28,10 @@ STATUS_HEX = ["#26d07c", "#6e6d67", "#e0613b"]
 DEFAULT_OPACITY = 0.70
 DEFAULT_STROKE_WIDTH = 0.60
 DEFAULT_LABEL_MODE = "auto"
+class MapConversionError(RuntimeError):
+    """Erro esperado de entrada ou de extração, exibível no job do usuário."""
+
+
 QUALITY_PRESETS = {
     "light": {"max_px": 2000, "quality": 78},
     "optimized": {"max_px": 3000, "quality": 86},
@@ -967,7 +971,13 @@ def convert(pdf_path, out_html, page_index=0, max_px=None, rotate="auto",
     scale = effective_max_px / max(page.rect.width, page.rect.height)
     lots = extract_lots(page, area_min, area_max)
     if not lots:
-        sys.exit("Nenhum lote encontrado. Ajuste --area-min / --area-max.")
+        has_vector_content = bool(_segments(page) or _text_items(page))
+        if not has_vector_content:
+            raise MapConversionError(
+                "Este PDF e uma imagem rasterizada, sem linhas ou textos vetoriais extraiveis. "
+                "O mapeamento automatico precisa do PDF original exportado do CAD, com as divisas dos lotes em vetor."
+            )
+        raise MapConversionError("Nenhum lote encontrado. Ajuste os limites de area ou envie o PDF original do CAD.")
     metas = extract_lot_metadata(page, lots)
     bg = render_background(page, scale); W0, H0 = bg.size
     mask = bg.convert("L").point(lambda v: 255 if v < 245 else 0)
