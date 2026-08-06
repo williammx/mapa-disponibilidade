@@ -368,6 +368,119 @@ def _anchor_guided_lots_from_segments(segments, label_points, area_min, area_max
     return [chosen[index][1] for index in sorted(chosen)]
 
 
+_NON_LOT_AREA_RE = re.compile(
+    r"(?:\bA\s*\.?\s*V\s*\.?\s*\d|\bOPUB\s*\d*|\bAPP\b)", re.I)
+
+
+def _is_non_lot_area_text(text):
+    """Reconhece identificadores de areas comuns que se parecem com lotes."""
+    value = unicodedata.normalize("NFKD", str(text or ""))
+    value = value.encode("ascii", "ignore").decode("ascii")
+    return bool(_NON_LOT_AREA_RE.search(value))
+
+
+def _recover_unlabelled_neighbor_lots(page, trusted_lots, label_points, segments,
+                                      area_min, area_max):
+    """Recupera faces sem texto quando a vizinhanca prova que sao lotes.
+
+    Titulos e mascaras de CAD podem apagar o pequeno identificador ``Lxx`` sem
+    apagar toda a divisa. A face so entra quando encosta em dois lotes ja
+    validados, tem escala local compativel e nao representa uma area comum.
+    """
+    if not trusted_lots or not segments:
+        return []
+
+    minimum = min(float(area_min), 80.0)
+    maximum = max(float(area_max), 15000.0)
+    label_tree = STRtree(label_points) if label_points else None
+    trusted_union = unary_union(trusted_lots)
+    represented_labels = {
+        index for index, point in enumerate(label_points)
+        if trusted_union.covers(point)
+    }
+    excluded_points = [
+        Point(item["cx"], item["cy"])
+        for item in _text_items(page)
+        if _is_non_lot_area_text(item["text"])
+    ]
+    candidates = []
+
+    try:
+        faces = polygonize(unary_union(MultiLineString(segments)))
+        for candidate in faces:
+            if not minimum <= candidate.area <= maximum:
+                continue
+            candidate_labels = []
+            if label_tree:
+                candidate_labels = [
+                    label_points.index(point)
+                    for point in _tree_hits(
+                        label_tree, label_points, candidate)
+                    if candidate.covers(point)
+                ]
+            # Uma face com mais de um rotulo ainda esta agrupada. Uma face com
+            # um rotulo ja representado sobrepoe um lote confiavel.
+            if (len(candidate_labels) > 1 or
+                    any(index in represented_labels
+                        for index in candidate_labels)):
+                continue
+            if any(candidate.covers(point) for point in excluded_points):
+                continue
+
+            try:
+                rectangle_area = candidate.minimum_rotated_rectangle.area
+                fill_ratio = candidate.area / max(rectangle_area, 1.0)
+                vertex_count = len(candidate.exterior.coords)
+            except Exception:
+                continue
+            if fill_ratio < 0.55 or vertex_count > 32:
+                continue
+            if candidate.intersection(trusted_union).area / candidate.area > 0.08:
+                continue
+            candidates.append((_clean_lot_polygon(candidate), candidate_labels))
+    except Exception:
+        return []
+
+    # Propaga a confianca ao longo de uma fileira. Isso recupera sequencias de
+    # lotes ocultadas por um titulo grande, mas exige duas bordas conhecidas para
+    # faces sem rotulo. Um rotulo unico e ainda nao usado vale como uma ancora.
+    recovered = []
+    current_lots = list(trusted_lots)
+    pending = candidates
+    for _pass in range(6):
+        if not pending:
+            break
+        current_tree = STRtree(current_lots)
+        accepted = []
+        remaining = []
+        for candidate, candidate_labels in pending:
+            local_lots = [
+                lot for lot in _tree_hits(
+                    current_tree, current_lots, candidate.buffer(2.01))
+                if candidate.distance(lot) <= 2.0
+            ]
+            minimum_neighbors = 1 if candidate_labels else 2
+            if len(local_lots) < minimum_neighbors:
+                remaining.append((candidate, candidate_labels))
+                continue
+            local_areas = sorted(lot.area for lot in local_lots)
+            local_median = local_areas[len(local_areas) // 2]
+            area_ratio = candidate.area / max(local_median, 1.0)
+            if not 0.50 <= area_ratio <= 1.80:
+                remaining.append((candidate, candidate_labels))
+                continue
+            accepted.append((candidate, candidate_labels))
+
+        if not accepted:
+            break
+        for candidate, candidate_labels in accepted:
+            recovered.append(candidate)
+            current_lots.append(candidate)
+            represented_labels.update(candidate_labels)
+        pending = remaining
+    return _dedupe_polygons(recovered, tol=0.20)
+
+
 def _anchor_guided_lots(page, label_points, area_min, area_max):
     """Fallback de duas passagens para PDFs CAD com camadas nao padronizadas."""
     if len(label_points) < 40:
@@ -376,7 +489,11 @@ def _anchor_guided_lots(page, label_points, area_min, area_max):
     lots = _anchor_guided_lots_from_segments(
         segments, label_points, area_min, area_max)
     minimum_coverage = max(40, math.ceil(len(label_points) * 0.94))
-    return lots if len(lots) >= minimum_coverage else []
+    if len(lots) < minimum_coverage:
+        return []
+    recovered = _recover_unlabelled_neighbor_lots(
+        page, lots, label_points, segments, area_min, area_max)
+    return lots + recovered
 
 
 def _repair_lot_gaps(page, lots, area_min, area_max, label_points=None):

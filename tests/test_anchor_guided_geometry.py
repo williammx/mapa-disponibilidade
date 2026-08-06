@@ -5,6 +5,8 @@ from pdf_to_map import (
     _anchor_guided_lots_from_segments,
     _geometry_only_segments,
     _is_auxiliary_geometry_layer,
+    _is_non_lot_area_text,
+    _recover_unlabelled_neighbor_lots,
 )
 
 
@@ -72,3 +74,31 @@ def test_geometry_pass_ignores_annotation_layers():
     assert _is_auxiliary_geometry_layer("CL_SIMBOLOS")
     assert not _is_auxiliary_geometry_layer("BASE 2024")
     assert _geometry_only_segments(FakePage()) == [((0.0, 0.0), (10.0, 0.0))]
+
+
+def test_recovers_unlabelled_face_between_trusted_lots():
+    class FakePage:
+        def get_text(self, _kind):
+            return {"blocks": []}
+
+    segments = []
+    segments.extend(_rectangle_segments(0, 0, 10, 10))
+    segments.extend(_rectangle_segments(10, 0, 20, 10))
+    segments.extend(_rectangle_segments(20, 0, 30, 10))
+    trusted = _anchor_guided_lots_from_segments(
+        segments, [Point(5, 5), Point(25, 5)], 20, 200,
+        snap_candidates=(None,),
+    )
+
+    recovered = _recover_unlabelled_neighbor_lots(
+        FakePage(), trusted, [Point(5, 5), Point(25, 5)], segments, 20, 200)
+
+    assert len(recovered) == 1
+    assert recovered[0].covers(Point(15, 5))
+
+
+def test_common_area_labels_are_not_lot_anchors():
+    assert _is_non_lot_area_text("A.V.252")
+    assert _is_non_lot_area_text("OPUB04")
+    assert _is_non_lot_area_text("APP Lagoa")
+    assert not _is_non_lot_area_text("LT03 150m2")
