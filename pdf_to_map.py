@@ -5,7 +5,7 @@ pdf_to_map.py — PDF de loteamento (CAD) -> mapa interativo (HTML).
 Inclui um modo EDITAR: desenhar os lotes que faltam por cima do mapa.
 100% deterministico. Nao usa IA.  Deps: python -m pip install -r requirements.txt
 """
-import argparse, base64, csv, io, json, math, re, sys
+import argparse, base64, csv, io, json, math, re, sys, unicodedata
 try:
     import pymupdf
     from shapely.geometry import MultiLineString, Point, Polygon
@@ -97,6 +97,11 @@ CAD_LOT_LAYER_PREFIXES = ("4_fnc_",)
 CAD_LAYER_SNAP = 0.75
 CAD_LAYER_SNAP_CANDIDATES = (0.75, 1.25, 1.75, 2.25, 2.75)
 CAD_LOCAL_RECOVERY_SNAPS = (0.50, 0.75, 1.00, 1.25)
+ANCHOR_GUIDED_SNAPS = (None, 0.50, 0.75, 1.00, 1.25, 1.75)
+_AUXILIARY_LAYER_MARKERS = (
+    "veget", "texto", "text", "txt", "label", "simbol", "symbol", "dim",
+    "sector", "lake", "area_net", "app lagoa", "etapa",
+)
 
 
 def _is_cad_lot_layer(layer):
@@ -140,6 +145,41 @@ def _drawing_item_segments(item, curve_steps=8):
                    (quad.lr.x, quad.lr.y), (quad.ll.x, quad.ll.y)]
         for index in range(4):
             _append_segment(segments, corners[index], corners[(index + 1) % 4])
+    return segments
+
+
+def _normalized_layer_name(layer):
+    value = unicodedata.normalize("NFKD", str(layer or ""))
+    return value.encode("ascii", "ignore").decode("ascii").strip().lower()
+
+
+def _is_auxiliary_geometry_layer(layer):
+    """Identifica camadas de anotacao que nao podem dividir lotes."""
+    name = _normalized_layer_name(layer)
+    return any(marker in name for marker in _AUXILIARY_LAYER_MARKERS)
+
+
+def _geometry_only_segments(page):
+    """Le a malha vetorial sem textos, rotulos, cotas e simbolos do CAD.
+
+    Alguns projetos nao usam as camadas cadastrais ``4_fnc_*`` / ``LOTE``.
+    Neles, polygonizar todos os desenhos mistura as divisas com setas, mascaras
+    brancas e identificadores de quadra. A separacao acontece em memoria para
+    manter o PDF original intacto e os textos disponiveis para metadados.
+    """
+    try:
+        drawings = page.get_drawings(extended=True)
+    except TypeError:
+        return []
+    segments = []
+    for drawing in drawings:
+        if _is_auxiliary_geometry_layer(drawing.get("layer")):
+            continue
+        for item in drawing.get("items") or []:
+            for segment in _drawing_item_segments(item, curve_steps=1):
+                if ((segment[0][0] - segment[1][0]) ** 2 +
+                        (segment[0][1] - segment[1][1]) ** 2 > 1.0):
+                    segments.append(segment)
     return segments
 
 
@@ -272,6 +312,71 @@ def _tree_hits(tree, geometries, geometry):
         if 0 <= idx < len(geometries):
             hits.append(geometries[idx])
     return hits
+
+
+def _anchor_guided_lots_from_segments(segments, label_points, area_min, area_max,
+                                      snap_candidates=ANCHOR_GUIDED_SNAPS):
+    """Escolhe no maximo uma face compacta para cada rotulo de lote.
+
+    O rotulo funciona somente como ancora. Ele nunca vira geometria e faces sem
+    rotulo sao descartadas, eliminando letras vazadas, setas e mascaras de CAD.
+    """
+    if not segments or not label_points:
+        return []
+    label_tree = STRtree(label_points)
+    minimum = min(float(area_min), 80.0)
+    maximum = max(float(area_max), 15000.0)
+    chosen = {}
+
+    for snap_rank, grid in enumerate(snap_candidates):
+        snapped = (segments if grid is None else
+                   _snapped_segments(segments, grid, min_length_sq=0.0001))
+        if not snapped:
+            continue
+        try:
+            faces = polygonize(unary_union(MultiLineString(snapped)))
+            for candidate in faces:
+                if not minimum <= candidate.area <= maximum:
+                    continue
+                hit_indexes = []
+                for hit in label_tree.query(candidate):
+                    index = (int(hit) if not hasattr(hit, "contains") else
+                             label_points.index(hit))
+                    if candidate.covers(label_points[index]):
+                        hit_indexes.append(index)
+                if len(hit_indexes) != 1:
+                    continue
+
+                try:
+                    rectangle_area = candidate.minimum_rotated_rectangle.area
+                    fill_ratio = candidate.area / max(rectangle_area, 1.0)
+                    vertex_count = len(candidate.exterior.coords)
+                    centered = (candidate.centroid.distance(label_points[hit_indexes[0]]) /
+                                max(candidate.area ** 0.5, 1.0))
+                except Exception:
+                    continue
+                if fill_ratio < 0.55 or vertex_count > 32 or centered > 0.65:
+                    continue
+
+                score = (snap_rank, abs(1.0 - fill_ratio), centered,
+                         vertex_count, candidate.area)
+                previous = chosen.get(hit_indexes[0])
+                if previous is None or score < previous[0]:
+                    chosen[hit_indexes[0]] = (score, _clean_lot_polygon(candidate))
+        except Exception:
+            continue
+    return [chosen[index][1] for index in sorted(chosen)]
+
+
+def _anchor_guided_lots(page, label_points, area_min, area_max):
+    """Fallback de duas passagens para PDFs CAD com camadas nao padronizadas."""
+    if len(label_points) < 40:
+        return []
+    segments = _geometry_only_segments(page)
+    lots = _anchor_guided_lots_from_segments(
+        segments, label_points, area_min, area_max)
+    minimum_coverage = max(40, math.ceil(len(label_points) * 0.94))
+    return lots if len(lots) >= minimum_coverage else []
 
 
 def _repair_lot_gaps(page, lots, area_min, area_max, label_points=None):
@@ -621,6 +726,9 @@ def extract_lots(page, area_min, area_max):
             return global_lots
         return _recover_layered_gaps(page, layered, label_points, area_min, area_max,
                                      global_lots=global_lots)
+    anchor_guided = _anchor_guided_lots(page, label_points, area_min, area_max)
+    if anchor_guided:
+        return anchor_guided
     return _extract_lots_global(page, area_min, area_max, label_points)
 
 
