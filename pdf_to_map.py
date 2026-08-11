@@ -379,6 +379,82 @@ def _is_non_lot_area_text(text):
     return bool(_NON_LOT_AREA_RE.search(value))
 
 
+def _rotated_lot_profile(poly):
+    """Retorna largura, comprimento e angulo do retangulo orientado."""
+    coords = list(poly.minimum_rotated_rectangle.exterior.coords)
+    edges = []
+    for start, end in zip(coords, coords[1:]):
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = math.hypot(dx, dy)
+        edges.append((length, math.degrees(math.atan2(dy, dx)) % 180.0))
+    if not edges:
+        return 0.0, 0.0, 0.0
+    longest = max(edges, key=lambda edge: edge[0])
+    return min(edge[0] for edge in edges), longest[0], longest[1]
+
+
+def _angle_distance(first, second):
+    difference = abs(first - second) % 180.0
+    return min(difference, 180.0 - difference)
+
+
+def _has_compatible_lot_geometry(candidate, references, strict=True):
+    """Confirma que a face tem as duas dimensoes de um lote local."""
+    try:
+        short, long, angle = _rotated_lot_profile(candidate)
+    except Exception:
+        return False
+    if short <= 0 or long <= 0:
+        return False
+    short_limit, long_limit, angle_limit = (
+        (0.75, 0.70, 14.0) if strict else (0.60, 0.60, 20.0))
+    for reference in references:
+        try:
+            ref_short, ref_long, ref_angle = _rotated_lot_profile(reference)
+        except Exception:
+            continue
+        if ref_short <= 0 or ref_long <= 0:
+            continue
+        short_ratio = min(short / ref_short, ref_short / short)
+        long_ratio = min(long / ref_long, ref_long / long)
+        if (short_ratio >= short_limit and long_ratio >= long_limit and
+                _angle_distance(angle, ref_angle) <= angle_limit):
+            return True
+    return False
+
+
+def _page_rgb_image(page):
+    try:
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1.0, 1.0), alpha=False)
+        return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+    except Exception:
+        return None
+
+
+def _is_blue_road_candidate(image, page, candidate):
+    """Rejeita faces que pertencem as vias azuis do desenho urbanistico."""
+    if image is None:
+        return False
+    try:
+        point = candidate.representative_point()
+        scale_x = image.width / max(float(page.rect.width), 1.0)
+        scale_y = image.height / max(float(page.rect.height), 1.0)
+        center_x = max(0, min(image.width - 1, round(point.x * scale_x)))
+        center_y = max(0, min(image.height - 1, round(point.y * scale_y)))
+        samples = []
+        for offset_y in (-2, 0, 2):
+            for offset_x in (-2, 0, 2):
+                x = max(0, min(image.width - 1, center_x + offset_x))
+                y = max(0, min(image.height - 1, center_y + offset_y))
+                samples.append(image.getpixel((x, y)))
+        red = sorted(pixel[0] for pixel in samples)[len(samples) // 2]
+        green = sorted(pixel[1] for pixel in samples)[len(samples) // 2]
+        blue = sorted(pixel[2] for pixel in samples)[len(samples) // 2]
+        return blue >= 220 and blue - red >= 20 and blue - green >= 10
+    except Exception:
+        return False
+
+
 def _recover_unlabelled_neighbor_lots(page, trusted_lots, label_points, segments,
                                       area_min, area_max):
     """Recupera faces sem texto quando a vizinhanca prova que sao lotes.
@@ -393,7 +469,9 @@ def _recover_unlabelled_neighbor_lots(page, trusted_lots, label_points, segments
     minimum = min(float(area_min), 80.0)
     maximum = max(float(area_max), 15000.0)
     label_tree = STRtree(label_points) if label_points else None
+    trusted_tree = STRtree(trusted_lots)
     trusted_union = unary_union(trusted_lots)
+    page_image = _page_rgb_image(page)
     represented_labels = {
         index for index, point in enumerate(label_points)
         if trusted_union.covers(point)
@@ -436,6 +514,16 @@ def _recover_unlabelled_neighbor_lots(page, trusted_lots, label_points, segments
             if fill_ratio < 0.55 or vertex_count > 32:
                 continue
             if candidate.intersection(trusted_union).area / candidate.area > 0.08:
+                continue
+            if _is_blue_road_candidate(page_image, page, candidate):
+                continue
+            references = [
+                lot for lot in _tree_hits(
+                    trusted_tree, trusted_lots, candidate.buffer(12.0))
+                if candidate.distance(lot) <= 12.0
+            ]
+            if not _has_compatible_lot_geometry(
+                    candidate, references, strict=not bool(candidate_labels)):
                 continue
             candidates.append((_clean_lot_polygon(candidate), candidate_labels))
     except Exception:

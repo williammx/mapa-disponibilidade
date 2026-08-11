@@ -102,3 +102,23 @@ def test_common_area_labels_are_not_lot_anchors():
     assert _is_non_lot_area_text("OPUB04")
     assert _is_non_lot_area_text("APP Lagoa")
     assert not _is_non_lot_area_text("LT03 150m2")
+
+
+def test_does_not_recover_half_lot_fragment():
+    class FakePage:
+        def get_text(self, _kind):
+            return {"blocks": []}
+
+    segments = []
+    segments.extend(_rectangle_segments(0, 0, 10, 20))
+    segments.extend(_rectangle_segments(10, 0, 20, 11))
+    segments.extend(_rectangle_segments(20, 0, 30, 20))
+    trusted = _anchor_guided_lots_from_segments(
+        segments, [Point(5, 10), Point(25, 10)], 20, 400,
+        snap_candidates=(None,),
+    )
+
+    recovered = _recover_unlabelled_neighbor_lots(
+        FakePage(), trusted, [Point(5, 10), Point(25, 10)], segments, 20, 400)
+
+    assert recovered == []
