@@ -77,19 +77,33 @@ def _encode_background(image, settings):
 
 
 def _segments(page):
+    """Malha vetorial completa da pagina, com as curvas preservadas.
+
+    Loteamentos radiais tem frente e fundo de lote em arco. Reduzir cada curva a
+    corda entre o primeiro e o ultimo ponto deforma o lote inteiro, entao aqui a
+    tesselacao segue a tolerancia de achatamento (ver ``_bezier_steps``).
+    """
     segs = []
     for d in page.get_drawings():
         for it in d["items"]:
-            k = it[0]
-            if k == "l": a, b = it[1], it[2]; segs.append(((a.x, a.y), (b.x, b.y)))
-            elif k == "c": a, b = it[1], it[4]; segs.append(((a.x, a.y), (b.x, b.y)))
-            elif k == "re":
-                r = it[1]; c = [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
-                for i in range(4): segs.append((c[i], c[(i + 1) % 4]))
-            elif k == "qu":
-                q = it[1]; c = [(q.ul.x, q.ul.y), (q.ur.x, q.ur.y), (q.lr.x, q.lr.y), (q.ll.x, q.ll.y)]
-                for i in range(4): segs.append((c[i], c[(i + 1) % 4]))
-    return [s for s in segs if (s[0][0]-s[1][0])**2 + (s[0][1]-s[1][1])**2 > 1.0]
+            segs.extend(_significant_item_segments(it))
+    return segs
+
+
+def _legacy_segments(page):
+    """Malha com curvas reduzidas a cordas para compatibilidade.
+
+    Algumas plantas antigas foram validadas com esta representacao. Ela entra
+    apenas como candidata em PDFs com camadas; o ranking decide entre ela e a
+    malha curva atual usando qualidade e cobertura dos rotulos.
+    """
+    segments = []
+    for drawing in page.get_drawings():
+        for item in drawing.get("items") or []:
+            segments.extend(_drawing_item_segments(item, curve_steps=1))
+    return [segment for segment in segments
+            if ((segment[0][0] - segment[1][0]) ** 2 +
+                (segment[0][1] - segment[1][1]) ** 2 > 1.0)]
 
 
 CAD_LOT_LAYERS = {"lote"}
@@ -114,8 +128,37 @@ def _append_segment(segments, a, b, min_length_sq=0.0001):
         segments.append((a, b))
 
 
-def _drawing_item_segments(item, curve_steps=8):
-    """Converte um item vetorial do PDF em segmentos, preservando curvas."""
+CURVE_FLATNESS_TOL = 0.08     # pt de afastamento maximo entre a curva e a corda
+MAX_CURVE_STEPS = 64
+_MIN_SEGMENT_LENGTH_SQ = 0.01  # ~0,1 pt: so remove segmento degenerado
+
+
+def _bezier_steps(p0, p1, p2, p3, tolerance=CURVE_FLATNESS_TOL):
+    """Quantos segmentos a curva precisa para ficar dentro da tolerancia.
+
+    Estima a flecha (distancia maxima entre a curva e a corda) pelos pontos de
+    controle. Curva quase reta continua valendo um segmento; arco fechado ganha
+    quantos pontos forem necessarios. Sem isso, uma frente de lote em arco vira
+    uma corda reta e o lote inteiro sai com a area errada.
+    """
+    chord = math.hypot(p3.x - p0.x, p3.y - p0.y)
+    if chord <= 1e-6:
+        return 1
+    first = abs((p1.x - p0.x) * (p3.y - p0.y) - (p1.y - p0.y) * (p3.x - p0.x))
+    second = abs((p2.x - p0.x) * (p3.y - p0.y) - (p2.y - p0.y) * (p3.x - p0.x))
+    sagitta = (first + second) / chord
+    if sagitta <= tolerance:
+        return 1
+    return min(MAX_CURVE_STEPS,
+               max(2, int(math.ceil(math.sqrt(sagitta / tolerance) * 4))))
+
+
+def _drawing_item_segments(item, curve_steps=None):
+    """Converte um item vetorial do PDF em segmentos, preservando curvas.
+
+    ``curve_steps=None`` usa a tesselacao adaptativa, que e o comportamento
+    correto. Um numero fixo so deve ser usado em teste.
+    """
     segments = []
     kind = item[0]
     if kind == "l":
@@ -123,9 +166,10 @@ def _drawing_item_segments(item, curve_steps=8):
         _append_segment(segments, (a.x, a.y), (b.x, b.y))
     elif kind == "c":
         p0, p1, p2, p3 = item[1], item[2], item[3], item[4]
+        steps = curve_steps or _bezier_steps(p0, p1, p2, p3)
         previous = (p0.x, p0.y)
-        for step in range(1, curve_steps + 1):
-            t = step / curve_steps
+        for step in range(1, steps + 1):
+            t = step / steps
             u = 1.0 - t
             current = (
                 u**3*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t**3*p3.x,
@@ -145,6 +189,22 @@ def _drawing_item_segments(item, curve_steps=8):
                    (quad.lr.x, quad.lr.y), (quad.ll.x, quad.ll.y)]
         for index in range(4):
             _append_segment(segments, corners[index], corners[(index + 1) % 4])
+    return segments
+
+
+def _significant_item_segments(item, min_total_length_sq=1.0):
+    """Segmentos de um item, descartando o item inteiro se ele for irrelevante.
+
+    O filtro precisa olhar o item como um todo, nao pedaco por pedaco. Um arco
+    tesselado vira varios segmentos curtos que, isolados, pareceriam ruido e
+    seriam jogados fora justamente na parte curva do lote.
+    """
+    segments = _drawing_item_segments(item)
+    if not segments:
+        return []
+    total = sum(math.hypot(b[0]-a[0], b[1]-a[1]) for a, b in segments)
+    if total * total <= min_total_length_sq:
+        return []
     return segments
 
 
@@ -176,14 +236,11 @@ def _geometry_only_segments(page):
         if _is_auxiliary_geometry_layer(drawing.get("layer")):
             continue
         for item in drawing.get("items") or []:
-            for segment in _drawing_item_segments(item, curve_steps=1):
-                if ((segment[0][0] - segment[1][0]) ** 2 +
-                        (segment[0][1] - segment[1][1]) ** 2 > 1.0):
-                    segments.append(segment)
+            segments.extend(_significant_item_segments(item))
     return segments
 
 
-def _layered_lot_segments(page):
+def _layered_lot_segments(page, curve_steps=None):
     """Le somente as camadas cadastrais; ignora textos, ruas e hachuras."""
     segments = []
     layers = set()
@@ -197,13 +254,13 @@ def _layered_lot_segments(page):
             continue
         layers.add(layer)
         for item in drawing.get("items") or []:
-            segments.extend(_drawing_item_segments(item))
+            segments.extend(_drawing_item_segments(item, curve_steps=curve_steps))
     return segments, layers
 
 
-def _layered_lots(page, label_points, area_min, area_max):
+def _layered_lots(page, label_points, area_min, area_max, curve_steps=None):
     """Extrai lotes das OCGs do CAD sem cruzar linhas de outras camadas."""
-    segments, layers = _layered_lot_segments(page)
+    segments, layers = _layered_lot_segments(page, curve_steps=curve_steps)
     if not segments or not label_points:
         return []
 
@@ -274,6 +331,23 @@ def _dedupe_polygons(polys, tol=1.0):
     return out
 
 
+def _corner_count(poly, tolerance=0.5):
+    """Cantos reais do lote, ignorando os pontos de tesselacao de arco.
+
+    Contar vertice bruto castiga justamente o lote correto: numa praca de
+    retorno a frente e um arco e, com a curva preservada, ela sozinha traz
+    dezenas de pontos. A simplificacao devolve a forma em cantos — uma fatia de
+    pizza tem 4 ou 5, nao 60.
+    """
+    try:
+        simplified = poly.simplify(tolerance, preserve_topology=True)
+        if simplified.is_empty or simplified.geom_type != "Polygon":
+            return len(poly.exterior.coords)
+        return len(simplified.exterior.coords)
+    except Exception:
+        return len(poly.exterior.coords)
+
+
 def _looks_like_lot(poly):
     try:
         rect = poly.minimum_rotated_rectangle
@@ -282,9 +356,8 @@ def _looks_like_lot(poly):
         return False
     if rect_area <= 0:
         return False
-    coords = len(poly.exterior.coords)
     fill_ratio = poly.area / rect_area
-    return coords <= 12 and fill_ratio >= 0.62
+    return _corner_count(poly) <= 20 and fill_ratio >= 0.62
 
 
 def _clean_lot_polygon(poly):
@@ -350,7 +423,9 @@ def _anchor_guided_lots_from_segments(segments, label_points, area_min, area_max
                 try:
                     rectangle_area = candidate.minimum_rotated_rectangle.area
                     fill_ratio = candidate.area / max(rectangle_area, 1.0)
-                    vertex_count = len(candidate.exterior.coords)
+                    # Cantos, nao vertices: o arco da praca de retorno traz
+                    # dezenas de pontos e reprovaria um lote perfeitamente valido.
+                    vertex_count = _corner_count(candidate)
                     centered = (candidate.centroid.distance(label_points[hit_indexes[0]]) /
                                 max(candidate.area ** 0.5, 1.0))
                 except Exception:
@@ -584,7 +659,8 @@ def _anchor_guided_lots(page, label_points, area_min, area_max):
     return lots + recovered
 
 
-def _repair_lot_gaps(page, lots, area_min, area_max, label_points=None):
+def _repair_lot_gaps(page, lots, area_min, area_max, label_points=None,
+                     segments=None):
     """Fecha falhas locais usando os rótulos de lote como pontos de ancoragem.
 
     O snap global cria polígonos falsos em textos, ruas e áreas verdes. Aqui ele
@@ -598,7 +674,8 @@ def _repair_lot_gaps(page, lots, area_min, area_max, label_points=None):
     if not missing:
         return lots
 
-    snapped = _snapped_segments(_segments(page), 1.0)
+    snapped = _snapped_segments(
+        segments if segments is not None else _segments(page), 1.0)
     repaired = list(lots)
     repaired_tree = STRtree(repaired) if repaired else None
     for candidate in polygonize(unary_union(MultiLineString(snapped))):
@@ -699,8 +776,8 @@ def _clean_point_set(pts):
     return [(round(x, 2), round(y, 2)) for x, y in fixed.exterior.coords]
 
 
-def _extract_lots_global(page, area_min, area_max, label_points=None):
-    segs = _segments(page)
+def _extract_lots_global(page, area_min, area_max, label_points=None, segments=None):
+    segs = segments if segments is not None else _segments(page)
     if not segs: return []
     # O snap agressivo fecha algumas frestas, mas neste tipo de CAD cria falsos
     # positivos em textos/fragmentos. O caminho mais confiavel para o Setor E e
@@ -726,8 +803,11 @@ def _extract_lots_global(page, area_min, area_max, label_points=None):
                     not hits and candidate.area <= 1000 and _looks_like_lot(candidate)):
                 selected.append(_clean_lot_polygon(candidate))
         lots = selected
-        return _repair_lot_gaps(page, lots, adaptive_min, adaptive_lot_max, label_points)
-    return _repair_lot_gaps(page, lots, area_min, area_max, label_points)
+        return _repair_lot_gaps(
+            page, lots, adaptive_min, adaptive_lot_max, label_points,
+            segments=segs)
+    return _repair_lot_gaps(
+        page, lots, area_min, area_max, label_points, segments=segs)
 
 
 def _recover_layered_gaps(page, layered_lots, label_points, area_min, area_max,
@@ -920,26 +1000,273 @@ def _recover_layered_gaps(page, layered_lots, label_points, area_min, area_max,
     return recovered
 
 
+def _printed_area_points(page):
+    """Areas impressas dentro dos lotes: (ponto, metragem)."""
+    found = []
+    for item in _text_items(page):
+        match = AREA_RE.search(item["text"])
+        if not match:
+            continue
+        digits = re.search(r"\d+(?:[,.]\d+)?", match.group(0))
+        if not digits:
+            continue
+        try:
+            value = float(digits.group(0).replace(",", "."))
+        except ValueError:
+            continue
+        if value > 0:
+            found.append((Point(item["cx"], item["cy"]), value))
+    return found
+
+
+def _area_agreement(lots, printed_areas, tolerance=0.05):
+    """Fracao de lotes cuja area vetorial bate com a metragem impressa.
+
+    E a unica medida de qualidade que a propria planta oferece: numa malha
+    correta a razao area_vetorial/area_impressa e praticamente constante, porque
+    as duas descrevem o mesmo lote em escalas diferentes. Uma face diagonal ou um
+    lote fundido com o vizinho quebra essa razao na hora.
+
+    Retorna ``None`` quando nao ha amostra suficiente para julgar.
+    """
+    if not lots or len(printed_areas) < 20:
+        return None
+    points = [entry[0] for entry in printed_areas]
+    tree = STRtree(points)
+    ratios = []
+    for poly in lots:
+        inside = [printed_areas[index][1]
+                  for index in tree.query(poly)
+                  if poly.covers(points[int(index)])] if points else []
+        if len(inside) == 1 and inside[0] > 0:
+            ratios.append(poly.area / inside[0])
+    if len(ratios) < 20:
+        return None
+    median = sorted(ratios)[len(ratios) // 2]
+    if median <= 0:
+        return None
+    good = sum(1 for ratio in ratios if abs(ratio / median - 1.0) <= tolerance)
+    return good / len(ratios)
+
+
+def _label_coverage(lots, label_points):
+    """Fracao de rotulos que caiu dentro de exatamente um lote."""
+    if not label_points:
+        return 0.0
+    if not lots:
+        return 0.0
+    tree = STRtree(lots)
+    exact = 0
+    for point in label_points:
+        hits = [poly for poly in _tree_hits(tree, lots, point) if poly.covers(point)]
+        if len(hits) == 1:
+            exact += 1
+    return exact / len(label_points)
+
+
+def _rank_lot_candidate(lots, label_points, printed_areas):
+    """Nota de um conjunto de lotes: qualidade primeiro, cobertura depois.
+
+    Escolher o motor pela quantidade de poligonos e o que fazia uma malha cheia
+    de faces falsas vencer uma malha correta e menor. A metragem impressa e o
+    criterio honesto.
+    """
+    if not lots:
+        return (-1.0, 0.0, 0)
+    coverage = _label_coverage(lots, label_points)
+    agreement = _area_agreement(lots, printed_areas)
+    if agreement is None:
+        # Sem metragem impressa nao da para julgar a forma; sobra a cobertura.
+        return (0.0, coverage, len(lots))
+    return (agreement * 0.75 + coverage * 0.25, coverage, len(lots))
+
+
+def _median_area_ratio(lots, printed_areas):
+    """Escala tipica entre area vetorial e metragem impressa nesta planta."""
+    if not lots or not printed_areas:
+        return None
+    points = [entry[0] for entry in printed_areas]
+    tree = STRtree(points)
+    ratios = []
+    for poly in lots:
+        inside = [printed_areas[int(index)][1] for index in tree.query(poly)
+                  if poly.covers(points[int(index)])]
+        if len(inside) == 1 and inside[0] > 0:
+            ratios.append(poly.area / inside[0])
+    if len(ratios) < 20:
+        return None
+    return sorted(ratios)[len(ratios) // 2]
+
+
+def _complete_with_validated_lots(winner, pool, label_points, printed_areas,
+                                  tolerance=0.08):
+    """Preenche rotulos sem lote usando faces de outros motores, com conferencia.
+
+    O motor vencedor privilegia forma correta, entao alguns lotes ficam de fora.
+    Em vez de aceitar qualquer face que cubra o rotulo orfao — que foi como as
+    versoes anteriores inflaram o mapa com poligonos errados — cada candidata so
+    entra se a metragem impressa dentro dela confirmar o tamanho.
+    """
+    if not winner or not label_points or not pool:
+        return winner
+
+    tree = STRtree(winner)
+    missing = [point for point in label_points
+               if not any(poly.covers(point)
+                          for poly in _tree_hits(tree, winner, point))]
+    if not missing:
+        return winner
+
+    reference = _median_area_ratio(winner, printed_areas)
+    area_points = [entry[0] for entry in printed_areas] if printed_areas else []
+    area_tree = STRtree(area_points) if area_points else None
+
+    completed = list(winner)
+    completed_tree = STRtree(completed)
+    pending = list(missing)
+
+    for candidate in sorted(pool, key=lambda poly: poly.area):
+        if not pending:
+            break
+        hits = [point for point in pending if candidate.covers(point)]
+        if len(hits) != 1:
+            continue
+        # Nao pode invadir um lote ja aceito.
+        overlap = max((candidate.intersection(existing).area /
+                       max(1.0, min(candidate.area, existing.area))
+                       for existing in _tree_hits(completed_tree, completed, candidate)
+                       if candidate.intersects(existing)), default=0.0)
+        if overlap > 0.10:
+            continue
+        # Conferencia contra a metragem impressa, quando a planta oferece.
+        if reference and area_tree is not None:
+            inside = [printed_areas[int(index)][1] for index in area_tree.query(candidate)
+                      if candidate.covers(area_points[int(index)])]
+            if len(inside) != 1 or inside[0] <= 0:
+                continue
+            if abs((candidate.area / inside[0]) / reference - 1.0) > tolerance:
+                continue
+        completed.append(_clean_lot_polygon(candidate))
+        completed_tree = STRtree(completed)
+        pending.remove(hits[0])
+    return completed
+
+
 def extract_lots(page, area_min, area_max):
     label_points = _lot_label_points(page)
+    printed_areas = _printed_area_points(page)
+
+    candidates = []
+
+    def offer(lots):
+        if lots:
+            candidates.append((_rank_lot_candidate(lots, label_points, printed_areas), lots))
+
     layered = _layered_lots(page, label_points, area_min, area_max)
+    global_lots = _extract_lots_global(page, area_min, area_max, label_points)
+    offer(global_lots)
     if layered:
-        global_lots = _extract_lots_global(page, area_min, area_max, label_points)
-        # Alguns mapas antigos possuem OCGs parciais e uma malha global ja
-        # confiavel. Neles, trocar de motor reduziria a cobertura sem beneficio.
-        if len(layered) < len(global_lots) * 0.95:
-            return global_lots
-        return _recover_layered_gaps(page, layered, label_points, area_min, area_max,
-                                     global_lots=global_lots)
-    anchor_guided = _anchor_guided_lots(page, label_points, area_min, area_max)
-    if anchor_guided:
-        return anchor_guided
-    return _extract_lots_global(page, area_min, area_max, label_points)
+        offer(layered)
+        offer(_recover_layered_gaps(page, layered, label_points, area_min, area_max,
+                                    global_lots=global_lots))
+        legacy_global = _extract_lots_global(
+            page, area_min, area_max, label_points, segments=_legacy_segments(page))
+        offer(legacy_global)
+        offer(_recover_layered_gaps(
+            page, layered, label_points, area_min, area_max,
+            global_lots=legacy_global))
+        legacy_layered = _layered_lots(
+            page, label_points, area_min, area_max, curve_steps=8)
+        offer(legacy_layered)
+        offer(_recover_layered_gaps(
+            page, legacy_layered, label_points, area_min, area_max,
+            global_lots=legacy_global))
+    else:
+        offer(_anchor_guided_lots(page, label_points, area_min, area_max))
+
+    if not candidates:
+        return global_lots
+    candidates.sort(key=lambda entry: entry[0], reverse=True)
+    best_score = candidates[0][0][0]
+    # Diferencas abaixo de um ponto percentual nao justificam abandonar lotes
+    # rotulados. Nesse empate tecnico, a cobertura real da planta prevalece.
+    competitive = [entry for entry in candidates
+                   if entry[0][0] >= best_score - 0.01]
+    competitive.sort(key=lambda entry: (entry[0][1], entry[0][0], entry[0][2]),
+                     reverse=True)
+    winner = competitive[0][1]
+
+    pool = [poly for _, lots in candidates if lots is not winner for poly in lots]
+    return _complete_with_validated_lots(winner, pool, label_points, printed_areas)
 
 
 LOT_RE = re.compile(r"\bL\s*\d{1,3}[A-Z]?", re.I)
 AREA_RE = re.compile(r"\d+(?:[,.]\d+)?\s*m(?:²|2|Â²)", re.I)
-QUADRA_RE = re.compile(r"^E\d+$", re.I)
+# A nomenclatura de quadra muda de loteadora para loteadora: E12, Q195, QD-14,
+# Q210C. Fixar um unico formato faz o mapa sair sem quadra nenhuma e com dezenas
+# de lotes chamados "L003", indistinguiveis entre si.
+QUADRA_RE = re.compile(r"^(?:Q(?:D|U(?:ADRA)?)?[\s.\-]*)?\d{1,4}[A-Z]?$|^E\d{1,3}[A-Z]?$", re.I)
+_QUADRA_PREFIX_RE = re.compile(r"^(Q(?:D|U(?:ADRA)?)?|E)[\s.\-]*(\d{1,4}[A-Z]?)$", re.I)
+# "Q195 - 34 LOTES" / "QUADRA 12 - 8 LOTES": o gabarito impresso na propria planta.
+DECLARED_LOTS_RE = re.compile(
+    r"([A-Z]{1,6}[\s.\-]*\d{1,4}[A-Z]?)\s*[-–—]\s*(\d{1,4})\s*LOTES", re.I)
+
+
+def _normalize_quadra(text):
+    """Devolve o identificador de quadra num formato estavel, ou vazio."""
+    value = re.sub(r"\s+", "", _clean_text(text)).upper()
+    match = _QUADRA_PREFIX_RE.match(value)
+    if match:
+        return "%s%s" % (match.group(1).upper()[:1] if match.group(1)[:1].upper() != "E" else "E",
+                         match.group(2).upper())
+    if re.fullmatch(r"\d{1,4}[A-Z]?", value):
+        return "Q%s" % value
+    return ""
+
+
+def _quadra_label_items(page, texts=None):
+    """Rotulos de quadra da planta, ja normalizados.
+
+    O padrao e detectado por prancha em vez de fixado no codigo. Rotulos com
+    prefixo (``Q195``, ``QD-14``, ``E12``) sao inequivocos e tem prioridade.
+    Numero solto so vira quadra quando a planta nao usa prefixo em lugar nenhum —
+    caso contrario toda cota de medida viraria um rotulo de quadra.
+    """
+    items = texts if texts is not None else _text_items(page)
+    prefixed, bare = [], []
+    for item in items:
+        raw = re.sub(r"\s+", "", _clean_text(item["text"])).upper()
+        if not raw or _is_non_lot_area_text(raw) or _extract_lot_name(raw):
+            continue
+        if _QUADRA_PREFIX_RE.match(raw):
+            prefixed.append(dict(item, quadra=_normalize_quadra(raw)))
+        elif re.fullmatch(r"\d{1,4}[A-Z]?", raw):
+            bare.append(dict(item, quadra="Q%s" % raw))
+    if len(prefixed) >= 3:
+        return prefixed
+    if not bare:
+        return prefixed
+    # Rotulo de quadra e desenhado grande. Sem esse corte, cotas de 2 digitos
+    # espalhadas pela prancha seriam confundidas com identificador de quadra.
+    heights = sorted((item["bbox"][3] - item["bbox"][1]) for item in items)
+    cut = heights[int(len(heights) * 0.90)] if heights else 0.0
+    return [item for item in bare
+            if (item["bbox"][3] - item["bbox"][1]) >= cut]
+
+
+def declared_lot_counts(page, texts=None):
+    """Le "QNNN - NN LOTES": quantos lotes cada quadra deveria ter.
+
+    A planta traz o proprio gabarito. Serve para conferir a extracao em vez de
+    confiar que o numero de poligonos encontrados esta certo.
+    """
+    counts = {}
+    for item in (texts if texts is not None else _text_items(page)):
+        for name, total in DECLARED_LOTS_RE.findall(item["text"]):
+            quadra = _normalize_quadra(name)
+            if quadra:
+                counts[quadra] = int(total)
+    return counts
 
 
 def _clean_text(text):
@@ -980,12 +1307,93 @@ def _extract_area(text):
     return m.group(0).replace(" ", "").replace("Â²", "²")
 
 
-def _nearest_quadra(poly, quadras):
+def _nearest_quadra(poly, quadras, max_distance=None):
+    """Quadra do lote pelo rotulo mais proximo, com raio maximo.
+
+    Sem limite de distancia, um lote na ponta do mapa herda a quadra de outro
+    setor so porque nenhum rotulo melhor existe. O raio e derivado do tamanho do
+    proprio lote, entao acompanha a escala da prancha.
+    """
     if not quadras:
         return ""
-    c = poly.centroid
-    label = min(quadras, key=lambda q: (q["cx"]-c.x)**2 + (q["cy"]-c.y)**2)
-    return label["text"].upper()
+    center = poly.centroid
+    label = min(quadras,
+                key=lambda q: (q["cx"]-center.x)**2 + (q["cy"]-center.y)**2)
+    if max_distance is not None:
+        distance = math.hypot(label["cx"]-center.x, label["cy"]-center.y)
+        if distance > max_distance:
+            return ""
+    return label.get("quadra") or label["text"].upper()
+
+
+def _lot_number(name):
+    match = re.search(r"\d+", str(name or ""))
+    return int(match.group(0)) if match else 0
+
+
+def _refine_quadra_with_declared(metas, lots, quadras, declared):
+    """Corrige a quadra do lote usando a contagem declarada na planta.
+
+    O rotulo mais proximo erra em quadra curva e alongada: o lote da ponta fica
+    mais perto do rotulo da quadra vizinha. Mas a planta declara quantos lotes
+    cada quadra tem, e a numeracao reinicia em cada uma — entao um lote L022 nao
+    pode pertencer a uma quadra de 9 lotes. Essa contradicao e suficiente para
+    reatribuir o lote a quadra compativel mais proxima.
+    """
+    if not declared or not quadras:
+        return metas
+
+    counts = {}
+    for meta in metas:
+        name = meta.get("quadra")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+
+    def rename(meta, name):
+        meta["quadra"] = name
+        if meta.get("lote") and str(meta["lote"]).upper().startswith("L"):
+            meta["nome"] = "%s-%s" % (name, meta["lote"])
+
+    # Os lotes mais impossiveis saem primeiro: quanto maior o excesso sobre o
+    # limite declarado, mais certo e que a atribuicao original esta errada.
+    pending = []
+    for meta, poly in zip(metas, lots):
+        current = meta.get("quadra")
+        limit = declared.get(current)
+        number = _lot_number(meta.get("lote"))
+        if current and limit and number and number > limit:
+            pending.append((number - limit, meta, poly))
+    pending.sort(key=lambda entry: -entry[0])
+
+    for _, meta, poly in pending:
+        current = meta["quadra"]
+        number = _lot_number(meta.get("lote"))
+        center = poly.centroid
+        ordered = sorted(
+            quadras,
+            key=lambda q: (q["cx"] - center.x) ** 2 + (q["cy"] - center.y) ** 2)
+        fallback = None
+        for candidate in ordered:
+            name = candidate.get("quadra")
+            if not name or name == current:
+                continue
+            allowed = declared.get(name)
+            if allowed is not None and number > allowed:
+                continue  # a quadra nao chega a ter esse numero de lote
+            if fallback is None:
+                fallback = name
+            if allowed is not None and counts.get(name, 0) >= allowed:
+                continue  # quadra ja lotada segundo a propria planta
+            counts[current] = counts.get(current, 1) - 1
+            counts[name] = counts.get(name, 0) + 1
+            rename(meta, name)
+            break
+        else:
+            if fallback:
+                counts[current] = counts.get(current, 1) - 1
+                counts[fallback] = counts.get(fallback, 0) + 1
+                rename(meta, fallback)
+    return metas
 
 
 def extract_lot_metadata(page, lots):
@@ -993,7 +1401,10 @@ def extract_lot_metadata(page, lots):
     if not lots:
         return []
     texts = _text_items(page)
-    quadras = [t for t in texts if QUADRA_RE.match(t["text"])]
+    quadras = _quadra_label_items(page, texts)
+    # Raio de busca proporcional ao lote: o rotulo da quadra fica junto dela.
+    typical = sorted(poly.area for poly in lots)[len(lots) // 2] ** 0.5
+    quadra_radius = max(typical * 12.0, 60.0)
     tree = STRtree(lots)
     inside = {i: [] for i in range(len(lots))}
     for item in texts:
@@ -1012,15 +1423,21 @@ def extract_lot_metadata(page, lots):
             area = area or _extract_area(text)
             if lot_name and area:
                 break
+        quadra = _nearest_quadra(poly, quadras, max_distance=quadra_radius)
+        base_name = lot_name or ("Lote %d" % (i+1))
         metas.append({
             "index": i,
-            "nome": lot_name or ("Lote %d" % (i+1)),
-            "quadra": _nearest_quadra(poly, quadras),
+            # O rotulo Lxxx se repete em toda quadra. Sem o prefixo, dezenas de
+            # lotes ficam com o mesmo nome e o mapa nao serve para vender.
+            "nome": ("%s-%s" % (quadra, base_name)) if quadra and lot_name else base_name,
+            "lote": base_name,
+            "quadra": quadra,
             "area": area,
             "pdf_area": round(poly.area, 2),
             "extraido": bool(lot_name or area),
         })
-    return metas
+    return _refine_quadra_with_declared(metas, lots, quadras,
+                                        declared_lot_counts(page, texts))
 
 
 def _filter_lots_by_area_text(page, lots):
