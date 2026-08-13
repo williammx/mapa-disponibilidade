@@ -53,12 +53,11 @@ RUN mkdir -p /data/storage && chown -R ${APP_UID}:${APP_GID} /data
 # /app fica de root: a aplicacao nunca escreve no proprio codigo, e o container
 # nao poder reescrever os .py que executa e uma barreira barata.
 #
-# DESLIGADO NESTA ENTREGA DE PROPOSITO. O volume mapa_project_data ja existe em
-# producao com arquivos de root, e nenhum teste consegue provar que a troca de
-# dono funcionou — so o boot na VPS prova. Esta entrega sobe o mapa-storage-init,
-# que faz o chown; a proxima liga o USER com o volume ja no dono certo. Assim, se
-# algo der errado, o culpado e uma linha e nao trinta arquivos.
-# USER ${APP_UID}:${APP_GID}
+# Ligado numa entrega separada da que subiu o mapa-storage-init, de proposito: o
+# volume de producao pertencia ao root e nenhum teste prova a troca de dono, so o
+# boot na VPS. Com o chown ja feito e confirmado, esta linha entra sozinha — se
+# quebrar, o culpado e uma linha e nao trinta arquivos.
+USER ${APP_UID}:${APP_GID}
 
 EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

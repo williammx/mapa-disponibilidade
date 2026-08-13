@@ -80,13 +80,6 @@ def test_worker_tem_o_maior_teto_por_ser_quem_converte_o_pdf():
 # ---------------------------------------------------------------------------
 # Container sem privilegio + volume que ja existe com arquivos de root
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(
-    strict=True,
-    reason="USER desligado de proposito nesta entrega: o volume de producao ainda "
-           "pertence ao root e so o mapa-storage-init desta mesma entrega conserta "
-           "isso. Quando a proxima entrega descomentar o USER no Dockerfile, este "
-           "teste passa e o strict acusa o XPASS — a hora de remover este marcador.",
-)
 def test_dockerfile_nao_roda_como_root():
     conteudo = DOCKERFILE.read_text(encoding="utf-8")
     assert re.search(r"^USER\s+", conteudo, re.MULTILINE), "imagem ainda roda como root"
