@@ -29,6 +29,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: "7860"
+      # Sem esta variavel o gate de /docs, /redoc e /openapi.json nunca fecha:
+      # o mapa completo de rotas e schemas ficava publico para qualquer visitante.
+      APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mapa:mapa-local@db:5432/mapa}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}

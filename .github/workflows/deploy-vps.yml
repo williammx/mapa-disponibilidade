@@ -129,82 +129,15 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          ssh -i ~/.ssh/deploy_key "${VPS_USER}@${VPS_HOST}" "bash -s -- '${GITHUB_SHA}'" <<'REMOTE'
           set -euo pipefail
-
-          SHA="$1"
-          APP_DIR="/opt/mapa-disponibilidade"
-          ARCHIVE="/tmp/mapa-disponibilidade-${SHA}.tar.gz"
-          RELEASE_DIR="/tmp/mapa-disponibilidade-${SHA}"
-          BACKUP_DIR="/var/backups/mapa-disponibilidade"
-          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-
-          rm -rf "$RELEASE_DIR"
-          mkdir -p "$RELEASE_DIR"
-          tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
-
-          test -f "$APP_DIR/.env"
-
-          # ---- Rede de seguranca ANTES de qualquer coisa destrutiva ----
-          # O rsync abaixo usa --delete e o container roda `alembic upgrade head`
-          # no boot. Sem dump previo, um deploy ruim nao tinha volta.
-          cd "$APP_DIR"
-          sudo mkdir -p "$BACKUP_DIR"
-          if ! sudo docker compose exec -T db sh -c \
-              'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-              | sudo tee "$BACKUP_DIR/pre-deploy-${STAMP}.sql" >/dev/null; then
-            echo "ABORTADO: nao consegui gerar o backup do Postgres antes do deploy."
-            exit 1
-          fi
-          if [ ! -s "$BACKUP_DIR/pre-deploy-${STAMP}.sql" ]; then
-            echo "ABORTADO: o dump saiu vazio."
-            exit 1
-          fi
-          sudo gzip -f "$BACKUP_DIR/pre-deploy-${STAMP}.sql"
-          echo "Backup: $BACKUP_DIR/pre-deploy-${STAMP}.sql.gz ($(sudo du -h "$BACKUP_DIR/pre-deploy-${STAMP}.sql.gz" | cut -f1))"
-          # Guarda a versao anterior para permitir voltar sem depender do GitHub.
-          sudo rm -rf "$APP_DIR.previous"
-          sudo cp -a "$APP_DIR" "$APP_DIR.previous"
-          sudo find "$BACKUP_DIR" -name 'pre-deploy-*.sql.gz' -mtime +14 -delete || true
-
-          sudo rsync -a --delete \
-            --exclude=.env \
-            "$RELEASE_DIR/" "$APP_DIR/"
-          sudo chown -R "$USER":"$USER" "$APP_DIR"
-
-          cd "$APP_DIR"
-          docker compose config -q
-          docker compose up -d --build --remove-orphans
-
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://127.0.0.1:8000/health >/dev/null; then
-              docker compose ps
-              # A fila e um servico separado: um web verde com worker morto
-              # significa conversao que nunca termina, e o deploy passava assim.
-              if [ "$(docker compose ps -q worker | wc -l)" -eq 0 ] || \
-                 [ "$(docker inspect -f '{{.State.Running}}' mapa-worker 2>/dev/null)" != "true" ]; then
-                echo "FALHA: a aplicacao subiu mas o worker da fila nao esta rodando."
-                docker compose logs --tail=80 worker
-                exit 1
-              fi
-              rm -rf "$RELEASE_DIR" "$ARCHIVE"
-              echo "Backup desta entrega: $BACKUP_DIR/pre-deploy-${STAMP}.sql.gz"
-              echo "Versao anterior preservada em: $APP_DIR.previous"
-              exit 0
-            fi
-            sleep 4
-          done
-
-          docker compose ps
-          docker compose logs --tail=120 mapa-disponibilidade
-          echo "----------------------------------------------------------"
-          echo "DEPLOY FALHOU. Para voltar ao estado anterior, na VPS:"
-          echo "  sudo rsync -a --delete $APP_DIR.previous/ $APP_DIR/"
-          echo "  cd $APP_DIR && sudo docker compose up -d --build"
-          echo "  gunzip -c $BACKUP_DIR/pre-deploy-${STAMP}.sql.gz | sudo docker compose exec -T db psql -U \$POSTGRES_USER -d \$POSTGRES_DB"
-          echo "----------------------------------------------------------"
-          exit 1
-          REMOTE
+          # O script remoto vive em deploy/remote-release.sh, versionado. Antes
+          # ele era um heredoc na stdin do ssh: o passo terminava em 2 segundos,
+          # sem imprimir nada, e era marcado como sucesso sem ter publicado.
+          scp -i ~/.ssh/deploy_key deploy/remote-release.sh \
+            "${VPS_USER}@${VPS_HOST}:/tmp/remote-release-${GITHUB_SHA}.sh"
+          ssh -n -i ~/.ssh/deploy_key "${VPS_USER}@${VPS_HOST}" \
+            "bash /tmp/remote-release-${GITHUB_SHA}.sh '${GITHUB_SHA}'; \
+             estado=\$?; rm -f /tmp/remote-release-${GITHUB_SHA}.sh; exit \$estado"
 
       - name: Verificacao externa em producao
         env:
