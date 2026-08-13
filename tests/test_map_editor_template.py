@@ -239,3 +239,54 @@ def test_ids_escondidos_existem_no_template():
     html = montar()
     for identificador in pdf_to_map.VIEWER_GUARD_HIDDEN_IDS:
         assert 'id="%s"' % identificador in html, identificador
+
+
+# --- Extracao do editor para templates/editor/ -----------------------------
+# O template vivia como string de 77 KB dentro de pdf_to_map.py, sem lint nem
+# revisao possivel. Estes testes garantem que a montagem continua produzindo um
+# HTML unico e autossuficiente, e que os arquivos entram na imagem Docker.
+
+import os as _os
+
+
+_RAIZ = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+
+
+def test_os_tres_arquivos_do_editor_existem():
+    for nome in ("editor.css", "editor.html", "editor.js"):
+        caminho = _os.path.join(_RAIZ, "templates", "editor", nome)
+        assert _os.path.isfile(caminho), "%s sumiu de templates/editor" % nome
+        assert _os.path.getsize(caminho) > 500, "%s ficou vazio" % nome
+
+
+def test_template_montado_continua_sendo_um_html_completo():
+    import pdf_to_map
+
+    html = pdf_to_map.HTML_TEMPLATE
+    assert html.startswith("<!doctype html>")
+    assert html.rstrip().endswith("</html>")
+    # Uma tag de cada, na ordem certa: se a costura errar, isso quebra.
+    for abre, fecha in (("<style>", "</style>"), ("<script>", "</script>")):
+        assert html.count(abre) == 1 and html.count(fecha) == 1
+        assert html.index(abre) < html.index(fecha)
+    assert html.index("</style>") < html.index("<script>")
+
+
+def test_marcadores_de_substituicao_sobreviveram_a_extracao():
+    import pdf_to_map
+
+    for marcador in ("__DATA__", "__IMG__", "__TITLE__", "__W__", "__H__",
+                     "__OPACITY__", "__STROKE__", "__LABEL_MODE__", "__NLOTS__"):
+        assert marcador in pdf_to_map.HTML_TEMPLATE, "%s se perdeu" % marcador
+
+
+def test_dockerfile_copia_os_templates():
+    conteudo = open(_os.path.join(_RAIZ, "Dockerfile"), encoding="utf-8").read()
+    assert "COPY templates ./templates" in conteudo, (
+        "sem esta linha a imagem sobe sem o editor e o container morre no import")
+
+
+def test_dockerignore_nao_engole_o_html_do_editor():
+    """A regra `*.html` do .dockerignore excluiria templates/editor/editor.html."""
+    conteudo = open(_os.path.join(_RAIZ, ".dockerignore"), encoding="utf-8").read()
+    assert "!templates/**" in conteudo

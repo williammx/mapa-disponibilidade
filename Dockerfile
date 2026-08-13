@@ -39,6 +39,7 @@ RUN pip install --no-cache-dir -r requirements.lock.txt
 # ModuleNotFoundError. O .dockerignore ja limita quais .html entram (index, login
 # e portal), entao o glob nao traz lixo.
 COPY *.py *.html alembic.ini ./
+COPY templates ./templates
 COPY app_v1 ./app_v1
 COPY alembic ./alembic
 COPY demo ./demo

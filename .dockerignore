@@ -13,6 +13,8 @@ tmp
 !login.html
 !portal.html
 !frontend/index.html
+# O editor vive em templates/editor/*.html — a regra *.html acima o excluiria.
+!templates/**
 !frontend/public/**
 !README.md
 frontend/node_modules
