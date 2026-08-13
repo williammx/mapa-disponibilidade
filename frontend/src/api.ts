@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 export const isLocalDemoMode = import.meta.env.DEV && import.meta.env.VITE_USE_BACKEND !== "true";
 
@@ -7,6 +7,8 @@ export type ApiState<T> = {
   loading: boolean;
   error: string | null;
 };
+
+export type ApiResult<T> = ApiState<T> & { reload: () => void };
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   if (isLocalDemoMode && path.startsWith("/api")) {
@@ -36,8 +38,11 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   return response.json() as Promise<T>;
 }
 
-export function useApi<T>(path: string): ApiState<T> {
+export function useApi<T>(path: string): ApiResult<T> {
   const [state, setState] = useState<ApiState<T>>({ data: null, loading: true, error: null });
+  // Trocar o nonce e o que permite refazer a busca depois de um erro sem
+  // recarregar a pagina inteira, que era o unico recurso disponivel antes.
+  const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +57,9 @@ export function useApi<T>(path: string): ApiState<T> {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, nonce]);
 
-  return state;
+  const reload = useCallback(() => setNonce((value) => value + 1), []);
+
+  return { ...state, reload };
 }

@@ -1,3 +1,8 @@
+# Declaracao de intencao: o que o projeto usa e o piso minimo de cada coisa.
+# Quem manda no build da imagem e requirements.lock.txt, com as versoes exatas
+# verificadas pela suite de testes. Este arquivo existe para ser lido e para
+# regerar o lock; instalar direto dele so em ambiente de desenvolvimento.
+
 # Motor de conversao (CLI)
 pymupdf>=1.24
 shapely>=2.0

@@ -19,8 +19,20 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# UID/GID fixos: o volume mapa_project_data guarda arquivos de clientes entre
+# releases, entao o dono precisa ser o mesmo em toda imagem futura. Um UID
+# sorteado pelo sistema tornaria o volume ilegivel no proximo rebuild.
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --gid ${APP_GID} nexolote \
+    && useradd --uid ${APP_UID} --gid ${APP_GID} --no-create-home --shell /usr/sbin/nologin nexolote
+
+# O build roda na VPS a cada release. Instalar de requirements.txt, que so tem
+# pisos (">="), fazia cada deploy re-resolver as versoes: um release novo do
+# PyMuPDF ou do OpenCV entrava sozinho e mexia no motor de geometria recem
+# calibrado. O lock traz as versoes exatas que a suite de testes verifica.
+COPY requirements.txt requirements.lock.txt ./
+RUN pip install --no-cache-dir -r requirements.lock.txt
 
 # Lista explicita de modulos era uma armadilha: qualquer arquivo .py novo na raiz
 # ficava de fora da imagem e o container so quebrava no boot, em producao, com
@@ -31,6 +43,22 @@ COPY app_v1 ./app_v1
 COPY alembic ./alembic
 COPY demo ./demo
 COPY --from=frontend-build /frontend/dist ./frontend/dist
+
+# /data existe na imagem so para carimbar o dono: quando o Docker popula um
+# volume nomeado VAZIO, ele copia o conteudo e as permissoes daqui. Isso cobre
+# instalacao nova. Volume que ja existe com arquivos de root nao e tocado pelo
+# Docker — quem conserta esse caso e o servico mapa-storage-init do compose.yaml.
+RUN mkdir -p /data/storage && chown -R ${APP_UID}:${APP_GID} /data
+
+# /app fica de root: a aplicacao nunca escreve no proprio codigo, e o container
+# nao poder reescrever os .py que executa e uma barreira barata.
+#
+# DESLIGADO NESTA ENTREGA DE PROPOSITO. O volume mapa_project_data ja existe em
+# producao com arquivos de root, e nenhum teste consegue provar que a troca de
+# dono funcionou — so o boot na VPS prova. Esta entrega sobe o mapa-storage-init,
+# que faz o chown; a proxima liga o USER com o volume ja no dono certo. Assim, se
+# algo der errado, o culpado e uma linha e nao trinta arquivos.
+# USER ${APP_UID}:${APP_GID}
 
 EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

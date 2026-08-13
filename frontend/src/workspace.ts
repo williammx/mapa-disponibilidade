@@ -12,7 +12,10 @@ export type Project = {
   lots: number;
   pdfName?: string;
   quality?: "light" | "balanced" | "high";
-  processingStatus?: "empty" | "ready" | "processing" | "processed" | "failed";
+  // "cancelled" nasce no painel: o backend mapeia job cancelado de volta para
+  // ready/processed (app_v1/api.py:111), mas a tela precisa distinguir quem
+  // parou por ordem do operador para oferecer o botao de repetir.
+  processingStatus?: "empty" | "ready" | "processing" | "processed" | "failed" | "cancelled";
   processingProgress?: number;
   processingLog?: string[];
   processingJobId?: string;

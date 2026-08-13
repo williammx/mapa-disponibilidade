@@ -652,7 +652,9 @@ def shared_map_response(project: Project, version: ProjectVersion, allow_edit: b
     if allow_edit and link:
         html = html.replace("</head>", client_edit_injection(link) + "</head>", 1)
     else:
-        viewer_guard = """<style id=\"shared-viewer\">#side,#sideToggle,#edit,#editor,#draft,#vertices{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');});</script>"""
+        # Fonte unica em pdf_to_map.viewer_guard_html: as tres copias que
+        # existiam aqui divergiam entre si e esqueciam ids diferentes.
+        viewer_guard = pdf_to_map.viewer_guard_html()
         html = html.replace("</head>", viewer_guard + "</head>", 1)
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
@@ -662,7 +664,7 @@ def read_only_html_response(path: str) -> HTMLResponse:
         raise HTTPException(status_code=404, detail="Mapa de demonstracao nao encontrado.")
     with open(path, "r", encoding="utf-8") as map_file:
         html = map_file.read()
-    viewer_guard = """<style id="shared-viewer">#side,#sideToggle,#edit,#editor,#draft,#vertices,#canvasStatus,#lrot{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');var count=document.getElementById('cnt');if(count)count.textContent='demonstracao';});</script>"""
+    viewer_guard = pdf_to_map.viewer_guard_html(count_label="demonstracao")
     html = html.replace("</head>", viewer_guard + "</head>", 1)
     return HTMLResponse(html, headers={"Cache-Control": "public, max-age=3600"})
 
@@ -1166,7 +1168,7 @@ def converter_map_html(job: dict, include_controls: bool, allow_edit: bool = Tru
         html = map_file.read()
     additions = converter_editor_controls(job, owner_token) if include_controls else ""
     if not allow_edit:
-        additions += """<style id="shared-viewer">#side,#sideToggle,#edit,#editor,#draft,#vertices,#canvasStatus{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');});</script>"""
+        additions += pdf_to_map.viewer_guard_html()
     return html.replace("</body>", additions + "</body>", 1)
 
 

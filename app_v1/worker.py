@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+from datetime import datetime, timedelta
 
 import pdf_to_map
 from database import SessionLocal
@@ -11,8 +12,21 @@ from .storage import copy_file, copy_to_path, ensure_project_key, storage_path
 from .validation import validate_lots
 
 
+def read_logs(job: ProcessingJob) -> list:
+    """Le job.logs sem deixar um texto corrompido derrubar o processamento.
+
+    A coluna e Text livre: uma gravacao truncada transformava qualquer append
+    seguinte — inclusive o que registra a falha — em JSONDecodeError.
+    """
+    try:
+        rows = json.loads(job.logs) if job.logs else []
+    except (TypeError, ValueError):
+        return []
+    return rows if isinstance(rows, list) else []
+
+
 def append_log(job: ProcessingJob, message: str) -> None:
-    rows = json.loads(job.logs) if job.logs else []
+    rows = read_logs(job)
     rows.append({"at": utcnow().isoformat(), "message": message})
     job.logs = json.dumps(rows, ensure_ascii=False)
 
@@ -22,6 +36,131 @@ def update_job(db, job: ProcessingJob, progress: int, step: str) -> None:
     job.current_step = step
     append_log(job, step)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Recuperacao de jobs orfaos
+#
+# O bloco `except` de run_processing_job so roda quando a excecao acontece
+# dentro do processo. Se o worker for morto de fora — OOM killer (PDF grande
+# rasteriza pixmaps enormes), `docker compose up -d` no meio de uma conversao,
+# reboot da VPS — nada marca a linha como falha: ela fica "running" para sempre
+# e a interface gira sem fim, sem nem oferecer o botao de repetir.
+#
+# ProcessingJob nao tem coluna de heartbeat e nao vamos inventar uma. O ultimo
+# sinal de vida disponivel e o mais recente entre created_at, started_at e o
+# timestamp da ultima linha de `logs` — que update_job() grava a cada etapa da
+# conversao. Um job vivo e lento sempre tem um desses recente.
+# ---------------------------------------------------------------------------
+JOB_TIMEOUT_DEFAULT_SECONDS = 900
+# Margem sobre o timeout da fila: cobre a limpeza do proprio RQ, relogios
+# levemente fora de sincronia entre containers e a etapa final de gravacao, que
+# nao emite log. So depois de timeout + margem sem sinal de vida a linha e dada
+# como perdida.
+JOB_STALE_MARGIN_DEFAULT_SECONDS = 300
+
+RECOVERABLE_JOB_STATUSES = ("running", "queued")
+
+STALLED_JOB_MESSAGE = (
+    "O processamento foi interrompido antes de terminar e nao deu sinal de vida "
+    "por mais de {minutos} minutos. Normalmente isso acontece quando o servidor "
+    "fica sem memoria durante a conversao de um PDF muito pesado, ou quando o "
+    "servico e reiniciado no meio do trabalho. Nenhum dado foi gravado pela "
+    "metade. Tente novamente ou envie um PDF mais leve."
+)
+
+
+def _env_seconds(name: str, default: int) -> int:
+    """Le um inteiro positivo do ambiente sem deixar valor invalido derrubar o worker."""
+    try:
+        value = int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def stalled_job_cutoff_seconds() -> int:
+    return (_env_seconds("JOB_TIMEOUT_SECONDS", JOB_TIMEOUT_DEFAULT_SECONDS)
+            + _env_seconds("JOB_STALE_MARGIN_SECONDS", JOB_STALE_MARGIN_DEFAULT_SECONDS))
+
+
+def _last_log_timestamp(job: ProcessingJob) -> datetime | None:
+    latest = None
+    for row in read_logs(job):
+        if not isinstance(row, dict):
+            continue
+        try:
+            moment = datetime.fromisoformat(str(row.get("at")))
+        except (TypeError, ValueError):
+            continue
+        # utcnow() e ingenuo; um timestamp com fuso quebraria a comparacao.
+        if moment.tzinfo is not None:
+            moment = moment.replace(tzinfo=None)
+        if latest is None or moment > latest:
+            latest = moment
+    return latest
+
+
+def last_sign_of_life(job: ProcessingJob) -> datetime | None:
+    moments = [job.created_at, job.started_at, _last_log_timestamp(job)]
+    known = [moment for moment in moments if isinstance(moment, datetime)]
+    return max(known) if known else None
+
+
+def recover_stalled_jobs(db, skip_job_id: str | None = None, now: datetime | None = None) -> list[str]:
+    """Marca como falha os jobs que ficaram orfaos e devolve os ids afetados.
+
+    Idempotente e barata: o filtro por created_at usa indice e, em operacao
+    normal, nao volta linha nenhuma.
+    """
+    now = now or utcnow()
+    limit_seconds = stalled_job_cutoff_seconds()
+    cutoff = now - timedelta(seconds=limit_seconds)
+    # created_at e sempre <= qualquer outro sinal de vida, entao filtrar por ele
+    # no banco nunca descarta um job realmente travado.
+    candidates = db.query(ProcessingJob).filter(
+        ProcessingJob.status.in_(RECOVERABLE_JOB_STATUSES),
+        ProcessingJob.created_at < cutoff,
+    ).all()
+    message = STALLED_JOB_MESSAGE.format(minutos=max(1, limit_seconds // 60))
+    recovered: list[str] = []
+    for job in candidates:
+        if skip_job_id and job.id == skip_job_id:
+            continue
+        seen_at = last_sign_of_life(job)
+        if seen_at is not None and seen_at >= cutoff:
+            continue
+        job.status = "failed"
+        job.error_message = message
+        job.can_retry = True
+        job.current_step = "Processamento interrompido pelo servidor."
+        job.finished_at = now
+        append_log(job, "Job dado como perdido: sem sinal de vida desde %s." % (
+            seen_at.isoformat() if seen_at else "o inicio"))
+        db.add(AuditEvent(
+            actor_user_id=job.requested_by_user_id,
+            organization_id=job.organization_id,
+            action="processing_job_stalled",
+            target_type="processing_job",
+            target_id=job.id,
+            details=json.dumps({
+                "last_sign_of_life": seen_at.isoformat() if seen_at else None,
+                "cutoff_seconds": limit_seconds,
+            }, ensure_ascii=False),
+        ))
+        recovered.append(job.id)
+    if recovered:
+        db.commit()
+    return recovered
+
+
+def recover_stalled_jobs_quietly(db, skip_job_id: str | None = None) -> list[str]:
+    """Varredura best-effort: um erro aqui nunca pode impedir o trabalho real."""
+    try:
+        return recover_stalled_jobs(db, skip_job_id=skip_job_id)
+    except Exception:
+        db.rollback()
+        return []
 
 
 # O conversor devolve o status como indice (0/1/2) na mesma ordem de
@@ -101,6 +240,9 @@ def extract_lots_from_info(info: dict, project_id: str, version_id: str) -> list
 def run_processing_job(job_id: str) -> None:
     db = SessionLocal()
     try:
+        # Se o worker anterior morreu de OOM, o proximo job e quem descobre:
+        # varre antes de comecar e liberta as linhas presas em "running".
+        recover_stalled_jobs_quietly(db, skip_job_id=job_id)
         job = db.get(ProcessingJob, job_id)
         if not job:
             return

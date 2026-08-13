@@ -1,3 +1,13 @@
+# Limites de recurso usam `deploy.resources.limits`. Essa e a sintaxe que o
+# `docker compose up` (Compose V2, o que deploy/remote-release.sh invoca) aplica
+# de verdade: limits.memory vira --memory e limits.cpus vira --cpus no container.
+# O que so funcionaria em Swarm e replicas/placement e reservations de cpu - por
+# isso nenhum dos tres aparece aqui.
+#
+# A soma dos limites passa da RAM da VPS de proposito. O objetivo nao e fatiar a
+# maquina, e impedir que UM processo doente leve o resto junto: hoje, sem limite
+# nenhum, a conversao de um PDF grande consome a memoria do host e derruba o
+# Postgres. Com o teto, quem morre e so o container que saiu da linha.
 services:
   db:
     image: postgres:16-alpine
@@ -14,6 +24,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          # Banco de poucas tabelas com shared_buffers padrao (128MB): o uso real
+          # fica na casa das centenas de MB. 1g e folgado de proposito - este e o
+          # servico que queremos proteger, nao o que queremos apertar. Teto baixo
+          # aqui trocaria o problema de hoje por um OOM do banco.
+          memory: 1g
+          cpus: "1.0"
 
   redis:
     image: redis:7-alpine
@@ -22,6 +41,41 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - mapa_redis_data:/data
+    deploy:
+      resources:
+        limits:
+          # A fila guarda id de job, nao o PDF: o payload de cada entrada tem
+          # dezenas de bytes. 384m cobre o dataset, o AOF e o fork de reescrita
+          # com muita sobra.
+          memory: 384m
+          cpus: "0.5"
+
+  # O Dockerfile passou a rodar como UID 10001, sem privilegio. So que o volume
+  # mapa_project_data JA EXISTE em producao com arquivos de root, e o Docker so
+  # copia dono e permissao da imagem quando o volume nasce vazio - volume com
+  # conteudo ele monta como esta. Sem este servico, o container novo subiria e o
+  # primeiro upload morreria com PermissionError em /data/storage.
+  #
+  # Este container roda uma vez, como root, antes do app e do worker, e acerta o
+  # dono do volume. E idempotente: onde ja esta certo, o chown nao muda nada.
+  mapa-storage-init:
+    build: .
+    container_name: mapa-storage-init
+    # Sobrescreve o USER da imagem: so root pode reatribuir dono de arquivo.
+    user: "0:0"
+    # One-shot: reiniciar um container que ja terminou o servico seria ruido.
+    restart: "no"
+    # A imagem traz HEALTHCHECK do endpoint HTTP, que nao existe aqui.
+    healthcheck:
+      disable: true
+    # 10001 e o APP_UID/APP_GID do Dockerfile. Se um mudar, o outro tem que mudar
+    # junto, senao o volume fica ilegivel para a aplicacao.
+    command:
+      - sh
+      - -c
+      - mkdir -p /data/storage /data/projects /data/converter_jobs && chown -R 10001:10001 /data
+    volumes:
+      - mapa_project_data:/data
 
   mapa-disponibilidade:
     build: .
@@ -39,7 +93,15 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       SETUP_TOKEN: ${SETUP_TOKEN:-}
       PRIVATE_STORAGE_DIR: /data/storage
+      # Obrigatorio depois que a imagem virou sem privilegio: o default do codigo
+      # e /app/data/converter_jobs, e /app pertence ao root. As rotas legadas
+      # /converter e /converter/jobs criam esse diretorio no primeiro upload e
+      # quebrariam com PermissionError. Aqui elas escrevem no volume, como o
+      # resto da aplicacao.
+      CONVERTER_JOB_DIR: /data/converter_jobs
     depends_on:
+      mapa-storage-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -48,6 +110,15 @@ services:
       - "127.0.0.1:8000:7860"
     volumes:
       - mapa_project_data:/data
+    deploy:
+      resources:
+        limits:
+          # Nao e so uma API de I/O: as rotas /converter e /converter/jobs rodam
+          # pdf_to_map.convert() dentro deste processo, entao ele tambem
+          # rasteriza. Por isso 1536m, e nao os ~512m de um FastAPI comum. Ainda
+          # assim fica abaixo do worker, que e o lugar certo para conversao.
+          memory: 1536m
+          cpus: "1.0"
 
   worker:
     build: .
@@ -62,12 +133,24 @@ services:
       PRIVATE_STORAGE_DIR: /data/storage
       JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-900}
     depends_on:
+      mapa-storage-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
         condition: service_started
     volumes:
       - mapa_project_data:/data
+    deploy:
+      resources:
+        limits:
+          # O processo mais pesado do sistema. O preset "high" rasteriza ate
+          # 6800px de lado: so o pixmap RGB da ~139MB, e o pipeline mantem copias
+          # em PIL, numpy e OpenCV ao mesmo tempo. 2g absorve um PDF pesado
+          # legitimo e ainda assim mata a conversao que fugiu do controle antes
+          # de ela alcancar o Postgres.
+          memory: 2g
+          cpus: "1.5"
 
 volumes:
   mapa_postgres_data:

@@ -55,7 +55,7 @@ from .serialization import (
 )
 from .storage import ensure_project_key, safe_filename, storage_path, write_stream
 from .validation import validate_lots
-from .worker import enqueue_processing_job
+from .worker import enqueue_processing_job, recover_stalled_jobs_quietly
 
 router = APIRouter(prefix="/api/v1")
 
@@ -470,6 +470,10 @@ def create_processing_job(project_id: str, source_file_id: str | None = None, qu
 
 @router.get("/processing-jobs/{job_id}")
 def get_processing_job(job_id: str, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    # Esta e a rota que a interface fica consultando enquanto o spinner gira.
+    # Se o worker morreu de fora (OOM, reinicio), ninguem mais vai marcar a linha
+    # como falha — entao a propria consulta faz a varredura antes de responder.
+    recover_stalled_jobs_quietly(db)
     job = db.get(ProcessingJob, job_id)
     if not job or not user_can_access_org(db, user, job.organization_id):
         raise HTTPException(status_code=404, detail="Processamento nao encontrado.")

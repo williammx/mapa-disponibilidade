@@ -1,15 +1,33 @@
-import { ArrowSquareOut, CheckCircle, Copy, Eye, FilePdf, FloppyDisk, LockKey, Play, ShieldCheck, UploadSimple, WarningCircle } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowSquareOut, CheckCircle, Copy, Eye, FilePdf, FloppyDisk, LockKey, Play, Prohibit, ShieldCheck, UploadSimple, WarningCircle } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { apiRequest, isLocalDemoMode, useApi } from "../api";
+import { auditActionLabel } from "../audit";
+import type { AuditEvent } from "../audit";
+import { EmptyBlock, ErrorBlock, LoadingBlock } from "../components/DataStates";
+import { ShareLinksPanel } from "../components/ShareLinksPanel";
+import type { ShareLink } from "../components/ShareLinksPanel";
+import { formatDateTime } from "../format";
 import { attachProjectPdf, publishProject, setProjectProcessing, sharePath, takeProjectPdf, updateProject, useWorkspace } from "../workspace";
 import type { Project, Visibility } from "../workspace";
 
 const tabs = ["Visao geral", "Mapa e editor", "Validacao", "Versoes", "Publicacao", "Acessos", "Atividade"] as const;
 type Tab = (typeof tabs)[number];
-type ShareLink = { id: string; url: string | null; has_password: boolean; access_mode: string; allow_edit: boolean; active: boolean };
 type PublishResponse = { project: Project; share_link: ShareLink };
+// Espelha job_dict em app_v1/serialization.py:71.
+type ProcessingJob = {
+  id: string;
+  status: string;
+  progress: number;
+  current_step: string | null;
+  logs: unknown;
+  error_message: string | null;
+  can_retry: boolean;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+};
 type EditProposal = { id: string; title: string; summary: string | null; status: string; changes: { lots?: unknown[] }; created_at: string };
 // Formato devolvido por validate_lots em app_v1/validation.py.
 type ValidationIssue = { type: string; severity: string; lot_id: string; message: string };
@@ -31,9 +49,16 @@ export function ProjectWorkspacePage() {
   const [message, setMessage] = useState<string | null>(null);
   const [runtimePatch, setRuntimePatch] = useState<Partial<Project>>({});
   const [publishedShareUrl, setPublishedShareUrl] = useState("");
+  const [job, setJob] = useState<ProcessingJob | null>(null);
+  const [jobBusy, setJobBusy] = useState<"retry" | "cancel" | null>(null);
+  const [jobActionError, setJobActionError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const [pollNonce, setPollNonce] = useState(0);
+  const [managedLinks, setManagedLinks] = useState<ShareLink[] | null>(null);
   const startedPendingPdf = useRef(false);
   const response = useApi<{
     project: Project;
+    organization: { id: string; name: string; slug: string; active: boolean };
     latest_version: { id: string; lot_count: number; is_published: boolean } | null;
     share_links: ShareLink[];
   }>(`/api/v1/projects/${projectId}`);
@@ -42,13 +67,18 @@ export function ProjectWorkspacePage() {
   const project = useMemo(() => baseProject ? { ...baseProject, ...runtimePatch } : undefined, [baseProject, runtimePatch]);
   const shareUrl = useMemo(() => {
     if (!project) return "";
+    // Quando a aba Acessos ja carregou a lista, ela e a verdade mais recente:
+    // reflete criacao e revogacao feitas sem recarregar a pagina. Uma revogacao
+    // sem outro link ativo precisa mesmo zerar o endereco mostrado aqui.
+    if (managedLinks) return managedLinks.find((link) => link.active)?.url ?? "";
     if (publishedShareUrl) return publishedShareUrl;
     const backendUrl = response.data?.share_links.find((link) => link.active)?.url;
     if (backendUrl) return backendUrl;
     if (!isLocalDemoMode || project.status !== "published") return "";
     const path = sharePath(project);
     return path.startsWith("http") ? path : `${window.location.origin}${path}`;
-  }, [project, publishedShareUrl, response.data?.share_links]);
+  }, [project, publishedShareUrl, managedLinks, response.data?.share_links]);
+  const handleLinksChange = useCallback((links: ShareLink[]) => setManagedLinks(links), []);
 
   async function handleDetailsSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -131,6 +161,9 @@ export function ProjectWorkspacePage() {
           }),
         });
         setPublishedShareUrl(payload.share_link.url ?? "");
+        // A lista da aba Acessos acabou de ficar velha: zerar forca o painel a
+        // buscar de novo e evita mostrar o link antigo como se fosse o atual.
+        setManagedLinks(null);
       }
       setRuntimePatch((current) => ({
         ...current,
@@ -151,16 +184,67 @@ export function ProjectWorkspacePage() {
     if (isLocalDemoMode && baseProject) setProjectProcessing(baseProject.id, patch);
   }, [baseProject?.id]);
 
+  const projectVersion = project?.version ?? 0;
+  const jobId = project?.processingJobId ?? null;
+
+  // Traduz um job da API para o estado da tela. Fica isolado porque o polling e
+  // os botoes de repetir e cancelar recebem exatamente o mesmo payload.
+  const applyJob = useCallback((nextJob: ProcessingJob) => {
+    setJob(nextJob);
+    if (nextJob.status === "succeeded") {
+      applyProjectPatch({
+        status: "review",
+        processingStatus: "processed",
+        processingProgress: 100,
+        processingLog: jobLogLines(nextJob.logs),
+        processingError: undefined,
+        mapUrl: `/projects/${projectId}/editor`,
+        version: Math.max(projectVersion, 1),
+      });
+      setMessage("Mapa concluido. O editor esta pronto para revisao.");
+      return;
+    }
+    if (nextJob.status === "failed") {
+      applyProjectPatch({
+        processingStatus: "failed",
+        processingProgress: nextJob.progress,
+        processingLog: jobLogLines(nextJob.logs),
+        processingError: nextJob.error_message ?? undefined,
+      });
+      setMessage(nextJob.error_message ?? "O processamento falhou.");
+      return;
+    }
+    if (nextJob.status === "cancelled") {
+      applyProjectPatch({
+        processingStatus: "cancelled",
+        processingProgress: nextJob.progress,
+        processingLog: jobLogLines(nextJob.logs),
+        processingError: undefined,
+      });
+      setMessage("Processamento cancelado. Voce pode repetir quando quiser.");
+      return;
+    }
+    applyProjectPatch({
+      processingStatus: "processing",
+      processingProgress: nextJob.progress,
+      processingLog: jobLogLines(nextJob.logs),
+    });
+  }, [applyProjectPatch, projectId, projectVersion]);
+
   const startProcessing = useCallback(async (file: File, selectedQuality?: Project["quality"]) => {
     if (!project) return;
     const quality = selectedQuality ?? project.quality ?? "balanced";
     attachProjectPdf(project.id, file.name, quality);
+    setJob(null);
+    setJobActionError(null);
+    setPollError(null);
     applyProjectPatch({
       pdfName: file.name,
       quality,
       processingStatus: "processing",
       processingProgress: 2,
       processingError: undefined,
+      processingJobId: undefined,
       mapUrl: undefined,
       processingLog: ["Enviando PDF para o motor de mapeamento."],
     });
@@ -168,6 +252,8 @@ export function ProjectWorkspacePage() {
     const body = new FormData();
     body.append("upload", file);
     try {
+      // Upload continua em fetch cru: apiRequest fixa Content-Type json e
+      // isso apagaria o boundary do multipart.
       const uploadResponse = await fetch(`/api/v1/projects/${project.id}/files?kind=source_pdf`, {
         method: "POST",
         credentials: "same-origin",
@@ -176,23 +262,49 @@ export function ProjectWorkspacePage() {
       const uploadPayload = await uploadResponse.json();
       if (!uploadResponse.ok) throw new Error(uploadPayload.detail ?? "Nao foi possivel enviar o PDF.");
       const query = new URLSearchParams({ quality, source_file_id: uploadPayload.file.id });
-      const jobResponse = await fetch(`/api/v1/projects/${project.id}/processing-jobs?${query}`, {
+      const payload = await apiRequest<{ job: ProcessingJob }>(`/api/v1/projects/${project.id}/processing-jobs?${query}`, {
         method: "POST",
-        credentials: "same-origin",
       });
-      const payload = await jobResponse.json();
-      if (!jobResponse.ok) throw new Error(payload.detail ?? "Nao foi possivel iniciar o processamento.");
-      applyProjectPatch({
-        processingJobId: payload.job.id,
-        processingProgress: payload.job.progress ?? 0,
-        processingLog: jobLogLines(payload.job.logs),
-      });
+      applyProjectPatch({ processingJobId: payload.job.id });
+      applyJob(payload.job);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Nao foi possivel processar o PDF.";
       applyProjectPatch({ processingStatus: "failed", processingError: detail, processingLog: [detail] });
       setMessage(detail);
     }
-  }, [project, applyProjectPatch]);
+  }, [project, applyProjectPatch, applyJob]);
+
+  async function retryJob() {
+    if (!jobId) return;
+    setJobBusy("retry");
+    setJobActionError(null);
+    setPollError(null);
+    try {
+      const payload = await apiRequest<{ job: ProcessingJob }>(`/api/v1/processing-jobs/${jobId}/retry`, { method: "POST" });
+      applyJob(payload.job);
+      if (payload.job.status === "queued" || payload.job.status === "running") {
+        setMessage("Processamento reenviado para a fila.");
+      }
+    } catch (error) {
+      setJobActionError(error instanceof Error ? error.message : "Nao foi possivel repetir o processamento.");
+    } finally {
+      setJobBusy(null);
+    }
+  }
+
+  async function cancelJob() {
+    if (!jobId) return;
+    setJobBusy("cancel");
+    setJobActionError(null);
+    try {
+      const payload = await apiRequest<{ job: ProcessingJob }>(`/api/v1/processing-jobs/${jobId}/cancel`, { method: "POST" });
+      applyJob(payload.job);
+    } catch (error) {
+      setJobActionError(error instanceof Error ? error.message : "Nao foi possivel cancelar o processamento.");
+    } finally {
+      setJobBusy(null);
+    }
+  }
 
   useEffect(() => {
     if (!project || startedPendingPdf.current) return;
@@ -201,70 +313,76 @@ export function ProjectWorkspacePage() {
     if (pendingFile) void startProcessing(pendingFile, project.quality);
   }, [project, startProcessing]);
 
+  // Enquanto o job nao tem estado conhecido (recem-aberto na tela) ou esta na
+  // fila/rodando, vale acompanhar. Terminou, falhou ou foi cancelado: para.
+  const jobStatus = job?.status ?? null;
+  const jobIsOpen = jobStatus === null || jobStatus === "queued" || jobStatus === "running";
+
   useEffect(() => {
-    if (!project?.processingJobId || project.processingStatus !== "processing") return;
+    if (!jobId || !jobIsOpen) return;
     let cancelled = false;
+    let failures = 0;
+    let timer = 0;
     const poll = async () => {
       try {
-        const response = await fetch(`/api/v1/processing-jobs/${project.processingJobId}`, { cache: "no-store", credentials: "same-origin" });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.detail ?? "Nao foi possivel consultar o processamento.");
+        const payload = await apiRequest<{ job: ProcessingJob }>(`/api/v1/processing-jobs/${jobId}`, { cache: "no-store" });
         if (cancelled) return;
-        const job = payload.job;
-        if (job.status === "succeeded") {
-          applyProjectPatch({
-            status: "review",
-            processingStatus: "processed",
-            processingProgress: 100,
-            processingLog: jobLogLines(job.logs),
-            processingError: undefined,
-            mapUrl: `/projects/${project.id}/editor`,
-            version: Math.max(project.version, 1),
-          });
-          setMessage("Mapa concluido. O editor esta pronto para revisao.");
-          return;
-        }
-        if (job.status === "failed") {
-          applyProjectPatch({
-            processingStatus: "failed",
-            processingProgress: job.progress,
-            processingLog: jobLogLines(job.logs),
-            processingError: job.error_message,
-          });
-          setMessage(job.error_message ?? "O processamento falhou.");
-          return;
-        }
-        applyProjectPatch({
-          processingStatus: "processing",
-          processingProgress: job.progress,
-          processingLog: jobLogLines(job.logs),
-        });
+        failures = 0;
+        setPollError(null);
+        applyJob(payload.job);
       } catch (error) {
-        if (!cancelled) setMessage(error instanceof Error ? error.message : "Falha ao acompanhar o processamento.");
+        if (cancelled) return;
+        failures += 1;
+        const detail = error instanceof Error ? error.message : "Falha ao acompanhar o processamento.";
+        // Erro isolado nao derruba o acompanhamento, mas insistir num endpoint
+        // que so devolve erro empilharia requisicao ate a aba morrer.
+        if (failures >= 5) {
+          window.clearInterval(timer);
+          setPollError(`${detail} Acompanhamento pausado depois de 5 tentativas.`);
+        } else {
+          setPollError(detail);
+        }
       }
     };
     void poll();
-    const timer = window.setInterval(poll, 900);
+    timer = window.setInterval(poll, 1200);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [project?.id, project?.processingJobId, project?.processingStatus, project?.version, applyProjectPatch]);
+  }, [jobId, jobIsOpen, applyJob, pollNonce]);
 
   if (!project && response.loading) {
-    return (
-      <div className="rounded-[8px] border border-white/10 bg-white/4 p-6" role="status">
-        <p className="text-sm text-slate-400">Carregando projeto...</p>
-      </div>
-    );
+    return <LoadingBlock label="Carregando projeto..." />;
   }
 
   if (!project) {
     return (
-      <div className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-6">
-        <h1 className="text-2xl font-medium text-orange-100">Projeto nao encontrado</h1>
-        <p className="mt-2 text-slate-300">Volte para a lista e escolha um projeto existente.</p>
-        <Link to="/app" className="mt-5 inline-flex rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950">Voltar aos projetos</Link>
+      <div className="space-y-5">
+        <div role="alert" className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-6">
+          <h1 className="text-2xl font-medium text-orange-100">Projeto nao encontrado</h1>
+          <p className="mt-2 text-sm leading-6 text-slate-300">
+            {response.error && !response.error.startsWith("Modo demo local")
+              ? response.error
+              : "Volte para a lista e escolha um projeto existente."}
+          </p>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={response.reload}
+              className="inline-flex items-center gap-2 rounded-[8px] border border-orange-200/30 px-4 py-3 text-sm font-medium text-orange-50 transition hover:bg-orange-300/12 focus-visible:ring-2 focus-visible:ring-emerald-300"
+            >
+              <ArrowClockwise size={16} weight="bold" />
+              Tentar de novo
+            </button>
+            <Link
+              to="/app"
+              className="inline-flex rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-300"
+            >
+              Voltar aos projetos
+            </Link>
+          </div>
+        </div>
       </div>
     );
   }
@@ -291,9 +409,9 @@ export function ProjectWorkspacePage() {
           <p className="mt-2 text-slate-400">{project.client} · {project.lots} lotes · {project.updatedAt}</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <Link to="/app" className="rounded-[8px] border border-white/12 px-4 py-3 text-sm font-medium">Voltar</Link>
+          <Link to="/app" className="rounded-[8px] border border-white/12 px-4 py-3 text-sm font-medium transition hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-emerald-300">Voltar</Link>
           {project.mapUrl ? (
-            <a href={projectEditorUrl(project)} className="inline-flex items-center gap-2 rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950">
+            <a href={projectEditorUrl(project)} className="inline-flex items-center gap-2 rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-300">
               <Play size={17} weight="bold" />
               Abrir editor
             </a>
@@ -305,8 +423,15 @@ export function ProjectWorkspacePage() {
           )}
         </div>
       </div>
-      {response.error && !response.error.startsWith("Modo demo local") ? <p className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-3 text-sm text-orange-100">{response.error}</p> : null}
-      {message ? <p className="rounded-[8px] border border-emerald-300/25 bg-emerald-300/8 p-3 text-sm text-emerald-100">{message}</p> : null}
+      {response.error && !response.error.startsWith("Modo demo local") ? (
+        <ErrorBlock message={response.error} onRetry={response.reload} />
+      ) : null}
+      {/* Regiao viva montada desde o inicio para o leitor de tela anunciar o resultado da acao. */}
+      <div role="status" aria-live="polite">
+        {message ? (
+          <p className="rounded-[8px] border border-emerald-300/25 bg-emerald-300/8 p-3 text-sm text-emerald-100">{message}</p>
+        ) : null}
+      </div>
 
       <div className="flex gap-2 overflow-x-auto border-b border-white/10 pb-2">
         {tabs.map((tab) => (
@@ -317,14 +442,32 @@ export function ProjectWorkspacePage() {
       </div>
 
       {activeTab === "Visao geral" ? <Overview project={project} onSubmit={handleDetailsSubmit} /> : null}
-      {activeTab === "Mapa e editor" ? <Editor project={project} shareUrl={shareUrl} onPdfChange={handlePdfChange} onQualityChange={handleQualityChange} onRetry={() => document.getElementById("workspace-pdf")?.click()} /> : null}
+      {activeTab === "Mapa e editor" ? (
+        <Editor
+          project={project}
+          shareUrl={shareUrl}
+          job={job}
+          jobBusy={jobBusy}
+          jobActionError={jobActionError}
+          pollError={pollError}
+          onResumePolling={() => {
+            setPollError(null);
+            setPollNonce((value) => value + 1);
+          }}
+          onRetryJob={retryJob}
+          onCancelJob={cancelJob}
+          onPdfChange={handlePdfChange}
+          onQualityChange={handleQualityChange}
+          onRetry={() => document.getElementById("workspace-pdf")?.click()}
+        />
+      ) : null}
       {activeTab === "Validacao" ? (
         <Validation projectId={project.id} versionId={response.data?.latest_version?.id ?? null} versionLoading={response.loading} />
       ) : null}
       {activeTab === "Versoes" ? <Versions project={project} onPublish={publish} /> : null}
       {activeTab === "Publicacao" ? <Publication project={project} shareUrl={shareUrl} onSubmit={handleAccessSubmit} onCopy={copyLink} onPublish={publish} /> : null}
-      {activeTab === "Acessos" ? <Access project={project} shareUrl={shareUrl} /> : null}
-      {activeTab === "Atividade" ? <ActivityList /> : null}
+      {activeTab === "Acessos" ? <Access project={project} shareUrl={shareUrl} onLinksChange={handleLinksChange} /> : null}
+      {activeTab === "Atividade" ? <ActivityList organizationId={response.data?.organization?.id ?? null} /> : null}
     </div>
   );
 }
@@ -361,8 +504,33 @@ function Overview({ project, onSubmit }: { project: Project; onSubmit: (event: F
   );
 }
 
-function Editor({ project, shareUrl, onPdfChange, onQualityChange, onRetry }: { project: Project; shareUrl: string; onPdfChange: (event: ChangeEvent<HTMLInputElement>) => void; onQualityChange: (event: ChangeEvent<HTMLSelectElement>) => void; onRetry: () => void }) {
-  const progress = project.processingProgress ?? 0;
+function Editor({
+  project,
+  shareUrl,
+  job,
+  jobBusy,
+  jobActionError,
+  pollError,
+  onResumePolling,
+  onRetryJob,
+  onCancelJob,
+  onPdfChange,
+  onQualityChange,
+  onRetry,
+}: {
+  project: Project;
+  shareUrl: string;
+  job: ProcessingJob | null;
+  jobBusy: "retry" | "cancel" | null;
+  jobActionError: string | null;
+  pollError: string | null;
+  onResumePolling: () => void;
+  onRetryJob: () => void;
+  onCancelJob: () => void;
+  onPdfChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onQualityChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+  onRetry: () => void;
+}) {
   const status = project.processingStatus ?? "empty";
   return (
     <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -382,8 +550,10 @@ function Editor({ project, shareUrl, onPdfChange, onQualityChange, onRetry }: { 
         <div className="mt-7 grid gap-5">
           <div>
             <span className="mb-2 block text-sm font-medium text-slate-300">PDF do empreendimento</span>
-            <input id="workspace-pdf" name="pdf" type="file" accept="application/pdf,.pdf" onChange={onPdfChange} disabled={status === "processing"} className="sr-only" />
-            <label htmlFor="workspace-pdf" className="flex cursor-pointer items-center justify-between gap-4 rounded-[8px] border border-dashed border-emerald-300/35 bg-emerald-300/7 p-4 transition hover:bg-emerald-300/10">
+            {/* O input fica escondido, entao o anel de foco precisa aparecer no
+                rotulo: sem isso o teclado navega para um alvo invisivel. */}
+            <input id="workspace-pdf" name="pdf" type="file" accept="application/pdf,.pdf" onChange={onPdfChange} disabled={status === "processing"} className="peer sr-only" />
+            <label htmlFor="workspace-pdf" className="flex cursor-pointer items-center justify-between gap-4 rounded-[8px] border border-dashed border-emerald-300/35 bg-emerald-300/7 p-4 transition hover:bg-emerald-300/10 peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-300">
               <span className="flex min-w-0 items-center gap-3">
                 <FilePdf className="shrink-0 text-emerald-300" size={24} weight="bold" />
                 <span className="min-w-0">
@@ -405,12 +575,12 @@ function Editor({ project, shareUrl, onPdfChange, onQualityChange, onRetry }: { 
           </label>
 
           <div className="flex flex-wrap gap-3">
-            <button type="button" onClick={onRetry} disabled={status === "processing"} className="inline-flex items-center gap-2 rounded-[8px] border border-white/12 px-4 py-3 text-sm font-medium transition hover:bg-white/8 disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button" onClick={onRetry} disabled={status === "processing"} className="inline-flex items-center gap-2 rounded-[8px] border border-white/12 px-4 py-3 text-sm font-medium transition hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-50">
               <UploadSimple size={17} weight="bold" />
-              {status === "failed" ? "Tentar com outro PDF" : project.pdfName ? "Substituir PDF" : "Selecionar PDF"}
+              {status === "failed" || status === "cancelled" ? "Tentar com outro PDF" : project.pdfName ? "Substituir PDF" : "Selecionar PDF"}
             </button>
             {project.mapUrl ? (
-              <a href={projectEditorUrl(project)} className="inline-flex items-center gap-2 rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300">
+              <a href={projectEditorUrl(project)} className="inline-flex items-center gap-2 rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-300">
                 <Play size={17} weight="bold" />
                 Abrir editor
               </a>
@@ -418,24 +588,16 @@ function Editor({ project, shareUrl, onPdfChange, onQualityChange, onRetry }: { 
           </div>
         </div>
 
-        <div className="mt-7 rounded-[8px] border border-white/10 bg-black/20 p-4">
-          <div className="flex items-center justify-between gap-4 text-sm">
-            <span className="text-slate-300">Progresso</span>
-            <span className="font-medium text-emerald-200">{progress}%</span>
-          </div>
-          <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-            <div className={`h-full rounded-full bg-emerald-400 transition-all duration-500 ${status === "processing" ? "animate-pulse" : ""}`} style={{ width: `${progress}%` }} />
-          </div>
-          <div className="mt-4 space-y-2 text-sm text-slate-300">
-            {(project.processingLog?.length ? project.processingLog : ["Nenhum PDF processado ainda."]).map((line, index) => (
-              <p key={`${line}-${index}`} className="flex gap-2">
-                <span className="mt-2 size-1.5 shrink-0 rounded-full bg-emerald-300" />
-                <span>{line}</span>
-              </p>
-            ))}
-            {project.processingError ? <p className="text-orange-200">{project.processingError}</p> : null}
-          </div>
-        </div>
+        <JobQueuePanel
+          project={project}
+          job={job}
+          jobBusy={jobBusy}
+          jobActionError={jobActionError}
+          pollError={pollError}
+          onResumePolling={onResumePolling}
+          onRetryJob={onRetryJob}
+          onCancelJob={onCancelJob}
+        />
       </div>
 
       <div className="rounded-[8px] border border-white/10 bg-white/4 p-6">
@@ -448,7 +610,7 @@ function Editor({ project, shareUrl, onPdfChange, onQualityChange, onRetry }: { 
         </div>
         <div className="mt-6 grid gap-3">
           {shareUrl ? (
-            <a href={shareUrl} className="rounded-[8px] border border-white/12 px-4 py-3 text-center text-sm font-medium">Ver link do cliente</a>
+            <a href={shareUrl} className="rounded-[8px] border border-white/12 px-4 py-3 text-center text-sm font-medium transition hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-emerald-300">Ver link do cliente</a>
           ) : (
             <button type="button" disabled className="rounded-[8px] border border-white/8 px-4 py-3 text-sm font-medium text-slate-500">Publique para gerar o link</button>
           )}
@@ -457,6 +619,170 @@ function Editor({ project, shareUrl, onPdfChange, onQualityChange, onRetry }: { 
       </div>
     </section>
   );
+}
+
+function JobQueuePanel({
+  project,
+  job,
+  jobBusy,
+  jobActionError,
+  pollError,
+  onResumePolling,
+  onRetryJob,
+  onCancelJob,
+}: {
+  project: Project;
+  job: ProcessingJob | null;
+  jobBusy: "retry" | "cancel" | null;
+  jobActionError: string | null;
+  pollError: string | null;
+  onResumePolling: () => void;
+  onRetryJob: () => void;
+  onCancelJob: () => void;
+}) {
+  const status = project.processingStatus ?? "empty";
+  const progress = job?.progress ?? project.processingProgress ?? 0;
+  const running = job ? job.status === "queued" || job.status === "running" : status === "processing";
+  const canCancel = Boolean(job && (job.status === "queued" || job.status === "running"));
+  // O endpoint de retry aceita apenas job com falha ou cancelado
+  // (app_v1/api.py:484). A marca can_retry so e ligada pelo worker quando o
+  // processamento quebra (app_v1/worker.py:112 e :175); cancelado nunca recebe
+  // a marca, por isso os dois casos entram separados.
+  const canRetry = Boolean(job && (job.status === "cancelled" || (job.status === "failed" && job.can_retry)));
+  const retryBlocked = Boolean(job && job.status === "failed" && !job.can_retry);
+  const errorMessage = job?.error_message ?? project.processingError ?? null;
+  const stepLabel = job?.current_step ?? (running ? "Aguardando a proxima atualizacao da fila." : null);
+  const statusLabelText = job ? jobStatusLabel(job.status) : processingLabel(status);
+  const logLines = project.processingLog?.length ? project.processingLog : ["Nenhum PDF processado ainda."];
+
+  return (
+    <div className="mt-7 rounded-[8px] border border-white/10 bg-black/20 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-medium text-slate-200">Fila de processamento</h3>
+        <span
+          className={`rounded-[8px] px-3 py-1 text-xs font-medium ${
+            job?.status === "succeeded"
+              ? "bg-emerald-300/12 text-emerald-200"
+              : job?.status === "failed" || job?.status === "cancelled"
+                ? "bg-orange-300/12 text-orange-100"
+                : "bg-white/8 text-slate-300"
+          }`}
+        >
+          {statusLabelText}
+        </span>
+      </div>
+
+      {/* So a frase de etapa fica na regiao viva: o percentual muda a cada
+          consulta e viraria ruido continuo no leitor de tela. */}
+      <p role="status" aria-live="polite" className="mt-4 text-sm text-slate-300">
+        {stepLabel ?? (job ? `Processamento ${statusLabelText.toLowerCase()}.` : "Nenhum processamento em andamento.")}
+      </p>
+
+      <div className="mt-3 flex items-center justify-between gap-4 text-sm">
+        <span className="text-slate-400">Progresso</span>
+        <span className="font-medium text-emerald-200">{progress}%</span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label="Progresso do processamento do PDF"
+        aria-valuenow={progress}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="mt-2 h-2 overflow-hidden rounded-full bg-white/10"
+      >
+        <div className={`h-full rounded-full bg-emerald-400 transition-all duration-500 ${running ? "animate-pulse" : ""}`} style={{ width: `${progress}%` }} />
+      </div>
+
+      {job?.started_at || job?.finished_at ? (
+        <p className="mt-3 text-xs text-slate-500">
+          {job.started_at ? `Inicio em ${formatDateTime(job.started_at)}` : "Ainda nao iniciado"}
+          {job.finished_at ? ` · fim em ${formatDateTime(job.finished_at)}` : ""}
+        </p>
+      ) : null}
+
+      <div className="mt-4 space-y-2 text-sm text-slate-300">
+        {logLines.map((line, index) => (
+          <p key={`${line}-${index}`} className="flex gap-2">
+            <span className="mt-2 size-1.5 shrink-0 rounded-full bg-emerald-300" />
+            <span>{line}</span>
+          </p>
+        ))}
+      </div>
+
+      {errorMessage ? (
+        <p role="alert" className="mt-4 rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-3 text-sm text-orange-100">
+          {errorMessage}
+        </p>
+      ) : null}
+
+      {canCancel || canRetry ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {canRetry ? (
+            <button
+              type="button"
+              onClick={onRetryJob}
+              disabled={jobBusy !== null}
+              className="inline-flex items-center gap-2 rounded-[8px] bg-emerald-400 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <ArrowClockwise size={16} weight="bold" />
+              {jobBusy === "retry" ? "Reenviando..." : "Repetir processamento"}
+            </button>
+          ) : null}
+          {canCancel ? (
+            <button
+              type="button"
+              onClick={onCancelJob}
+              disabled={jobBusy !== null}
+              className="inline-flex items-center gap-2 rounded-[8px] border border-orange-300/30 px-4 py-2 text-sm font-medium text-orange-100 transition hover:bg-orange-300/12 focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Prohibit size={16} weight="bold" />
+              {jobBusy === "cancel" ? "Cancelando..." : "Cancelar processamento"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {retryBlocked ? (
+        <p className="mt-3 text-xs leading-5 text-slate-400">
+          O servidor marcou este processamento como nao repetivel. Envie o PDF novamente para abrir um processamento novo.
+        </p>
+      ) : null}
+      {!job && !project.processingJobId && status === "failed" ? (
+        <p className="mt-3 text-xs leading-5 text-slate-400">
+          A falha registrada e de um processamento ja encerrado e a API nao devolve o identificador dele nesta tela. Envie o PDF
+          novamente para tentar de novo.
+        </p>
+      ) : null}
+
+      {jobActionError ? (
+        <p role="alert" className="mt-4 rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-3 text-sm text-orange-100">
+          {jobActionError}
+        </p>
+      ) : null}
+      {pollError ? (
+        <div role="alert" className="mt-4 rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-3 text-sm text-orange-100">
+          <p>{pollError}</p>
+          <button
+            type="button"
+            onClick={onResumePolling}
+            className="mt-3 inline-flex items-center gap-2 rounded-[8px] border border-orange-200/30 px-3 py-2 text-xs font-medium text-orange-50 transition hover:bg-orange-300/12 focus-visible:ring-2 focus-visible:ring-emerald-300"
+          >
+            <ArrowClockwise size={14} weight="bold" />
+            Retomar acompanhamento
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function jobStatusLabel(status: string) {
+  if (status === "queued") return "Na fila";
+  if (status === "running") return "Processando";
+  if (status === "succeeded") return "Concluido";
+  if (status === "failed") return "Falhou";
+  if (status === "cancelled") return "Cancelado";
+  return status;
 }
 
 function Step({ done, label }: { done: boolean; label: string }) {
@@ -475,6 +801,7 @@ function processingLabel(status: Project["processingStatus"]) {
   if (status === "processing") return "Processando";
   if (status === "ready") return "PDF pronto";
   if (status === "failed") return "Falhou";
+  if (status === "cancelled") return "Cancelado";
   return "Sem PDF";
 }
 
@@ -616,7 +943,15 @@ function Validation({ projectId, versionId, versionLoading }: { projectId: strin
           <h2 className="text-xl font-medium">Propostas enviadas pelo cliente</h2>
           <p className="mt-2 text-sm text-slate-400">Alteracoes do cliente ficam separadas da versao publicada ate sua decisao.</p>
         </div>
-        {response.data?.edit_proposals.length ? (
+        {response.loading ? (
+          <div className="p-5">
+            <LoadingBlock label="Carregando propostas do cliente..." rows={2} />
+          </div>
+        ) : response.error && !response.error.startsWith("Modo demo local") ? (
+          <div className="p-5">
+            <ErrorBlock message={response.error} onRetry={response.reload} />
+          </div>
+        ) : response.data?.edit_proposals.length ? (
           <div className="divide-y divide-white/8">
             {response.data.edit_proposals.map((proposal) => {
               const proposalStatus = statusPatch[proposal.id] ?? proposal.status;
@@ -637,7 +972,14 @@ function Validation({ projectId, versionId, versionLoading }: { projectId: strin
               );
             })}
           </div>
-        ) : <p className="p-6 text-sm text-slate-400">{response.loading ? "Carregando propostas..." : "Nenhuma proposta enviada."}</p>}
+        ) : (
+          <div className="p-5">
+            <EmptyBlock
+              title="Nenhuma proposta enviada"
+              description="Propostas aparecem aqui quando um link com permissao de edicao e usado pelo cliente. Libere a edicao em um link na aba Acessos para receber sugestoes."
+            />
+          </div>
+        )}
       </div>
     </section>
   );
@@ -704,27 +1046,63 @@ function Publication({ project, shareUrl, onSubmit, onCopy, onPublish }: { proje
   );
 }
 
-function Access({ project, shareUrl }: { project: Project; shareUrl: string }) {
+function Access({ project, shareUrl, onLinksChange }: { project: Project; shareUrl: string; onLinksChange: (links: ShareLink[]) => void }) {
   return (
-    <section className="rounded-[8px] border border-white/10 bg-white/4 p-6">
-      <h2 className="text-2xl font-medium">Acessos ativos</h2>
-      <div className="mt-5 grid gap-4">
-        <div className="rounded-[8px] border border-white/10 p-4">
+    <section className="space-y-6">
+      <div className="rounded-[8px] border border-white/10 bg-white/4 p-6">
+        <h2 className="text-2xl font-medium">Acesso configurado no projeto</h2>
+        <div className="mt-5 rounded-[8px] border border-white/10 p-4">
           <p className="font-medium">{visibilityLabel(project.visibility)}</p>
-          <p className="mt-2 break-all text-sm text-emerald-200">{shareUrl || "Nenhum link ativo. Publique uma versao primeiro."}</p>
+          <p className="mt-2 break-all text-sm text-emerald-200">{shareUrl || "Nenhum link ativo. Publique uma versao e crie um link abaixo."}</p>
           <p className="mt-2 text-sm text-slate-400">{project.allowEdit ? "Cliente pode enviar proposta de edicao." : "Somente leitura para o cliente."}</p>
         </div>
       </div>
+      <ShareLinksPanel projectId={project.id} onLinksChange={onLinksChange} />
     </section>
   );
 }
 
-function ActivityList() {
+function ActivityList({ organizationId }: { organizationId: string | null }) {
   const workspace = useWorkspace();
+  // O backend so filtra auditoria por cliente (app_v1/api.py:807); nao existe
+  // recorte por projeto, entao a aba mostra os eventos do cliente dono.
+  const response = useApi<{ audit_events: AuditEvent[] }>(
+    organizationId ? `/api/v1/audit-events?organization_id=${organizationId}&limit=50` : "/api/v1/audit-events?limit=50",
+  );
+  const demoFallback = isLocalDemoMode && Boolean(response.error?.startsWith("Modo demo local"));
+
+  if (demoFallback) {
+    return (
+      <section className="divide-y divide-white/8 rounded-[8px] border border-white/10">
+        {workspace.activity.map((item, index) => (
+          <div key={`${item}-${index}`} className="p-4 text-slate-300">{item}</div>
+        ))}
+      </section>
+    );
+  }
+
+  if (response.loading) return <LoadingBlock label="Carregando eventos deste cliente..." />;
+  if (response.error) return <ErrorBlock message={response.error} onRetry={response.reload} />;
+
+  const events = response.data?.audit_events ?? [];
+  if (!events.length) {
+    return (
+      <EmptyBlock
+        title="Nenhum evento registrado"
+        description="A auditoria guarda upload de PDF, processamento, publicacao e mudanca de link. Gere o mapa ou publique uma versao para os primeiros eventos aparecerem."
+      />
+    );
+  }
+
   return (
     <section className="divide-y divide-white/8 rounded-[8px] border border-white/10">
-      {workspace.activity.map((item, index) => (
-        <div key={`${item}-${index}`} className="p-4 text-slate-300">{item}</div>
+      {events.map((event) => (
+        <div key={event.id} className="flex flex-col gap-1 p-4 md:flex-row md:items-center md:justify-between">
+          <p className="text-slate-300">
+            <span className="font-medium text-slate-100">{event.actor_name ?? "Sistema"}</span> {auditActionLabel(event.action)}
+          </p>
+          <span className="text-sm text-slate-500">{formatDateTime(event.created_at)}</span>
+        </div>
       ))}
     </section>
   );

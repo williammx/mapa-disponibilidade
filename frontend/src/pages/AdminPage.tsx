@@ -1,5 +1,6 @@
 import { Database, HardDrives, Pulse, Queue } from "@phosphor-icons/react";
 import { useApi } from "../api";
+import { ErrorBlock, LoadingBlock } from "../components/DataStates";
 import { SectionHeader } from "../components/SectionHeader";
 
 type HealthResponse = {
@@ -11,23 +12,26 @@ type HealthResponse = {
 
 export function AdminPage() {
   const health = useApi<HealthResponse>("/api/v1/admin/health");
-  const data = health.data ?? {
-    status: "indisponivel",
-    database: "indisponivel",
-    redis_configured: false,
-    storage_root: "/data",
-  };
 
   return (
     <div className="space-y-9">
       <SectionHeader eyebrow="administracao" title="Saude da plataforma" description="Visao tecnica para acompanhar banco, fila, storage e capacidade da VPS." />
-      {health.error ? <p className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-3 text-sm text-orange-100">{health.error}</p> : null}
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatusCard icon={Pulse} label="API" value={data.status} />
-        <StatusCard icon={Database} label="Banco" value={data.database} />
-        <StatusCard icon={Queue} label="Redis/RQ" value={data.redis_configured ? "configurado" : "pendente"} />
-        <StatusCard icon={HardDrives} label="Storage" value={data.storage_root} />
-      </div>
+
+      {health.loading ? (
+        <LoadingBlock label="Consultando a saude da plataforma..." rows={2} />
+      ) : health.error ? (
+        <ErrorBlock message={health.error} onRetry={health.reload} />
+      ) : health.data ? (
+        // Sem dado real nao ha card: antes a tela chutava "indisponivel" e "/data"
+        // como se fossem a resposta do servidor.
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <StatusCard icon={Pulse} label="API" value={health.data.status} />
+          <StatusCard icon={Database} label="Banco" value={health.data.database} />
+          <StatusCard icon={Queue} label="Redis/RQ" value={health.data.redis_configured ? "configurado" : "pendente"} />
+          <StatusCard icon={HardDrives} label="Storage" value={health.data.storage_root} />
+        </div>
+      ) : null}
+
       <section className="rounded-[8px] border border-white/10 p-6">
         <h2 className="text-xl font-medium">Operacao recomendada</h2>
         <div className="mt-5 divide-y divide-white/8">
