@@ -1767,7 +1767,11 @@ def convert(pdf_path, out_html, page_index=0, max_px=None, rotate="auto",
             json.dump({"type": "FeatureCollection", "features": geo}, fh)
     n = [0, 0, 0]
     for item in data: n[item["s"]] += 1
-    return {"lotes": len(data), "modo": "fundo estatico + lotes editaveis", "tamanho_px": [W, H],
+    # "data" carrega os lotes em si. Sem essa chave o worker da fila grava zero
+    # lotes no banco em toda conversao (app_v1/worker.py:extract_lots_from_info)
+    # e a validacao assina laudo verde sobre lista vazia.
+    return {"lotes": len(data), "data": data,
+            "modo": "fundo estatico + lotes editaveis", "tamanho_px": [W, H],
             "alinhamento": align_info,
             "imagem": {"quality": quality_info["name"], "mime": img_mime, "max_px": effective_max_px},
             "estilo": {"opacity": opacity, "stroke_width": stroke_width, "label_mode": label_mode},
@@ -2123,7 +2127,13 @@ if __name__ == "__main__":
     ap.add_argument("--label-mode", choices=["auto", "always", "hidden"], default=DEFAULT_LABEL_MODE)
     ap.add_argument("--title", default="Mapa NexoLote")
     a = ap.parse_args()
-    print("OK ->", json.dumps(convert(a.pdf, a.out, page_index=a.page, max_px=a.max_px,
-          rotate=a.rotate, area_min=a.area_min, area_max=a.area_max, status_csv=a.status_csv,
-          geojson_out=a.geojson, snapshot_out=a.snapshot, title=a.title, quality=a.quality,
-          opacity=a.opacity, stroke_width=a.stroke_width, label_mode=a.label_mode), ensure_ascii=False))
+    info = convert(a.pdf, a.out, page_index=a.page, max_px=a.max_px,
+                   rotate=a.rotate, area_min=a.area_min, area_max=a.area_max,
+                   status_csv=a.status_csv, geojson_out=a.geojson,
+                   snapshot_out=a.snapshot, title=a.title, quality=a.quality,
+                   opacity=a.opacity, stroke_width=a.stroke_width,
+                   label_mode=a.label_mode)
+    # A lista de lotes vai no retorno para quem chama como biblioteca; no
+    # terminal ela seriam centenas de milhares de caracteres de poligono.
+    resumo = {chave: valor for chave, valor in info.items() if chave != "data"}
+    print("OK ->", json.dumps(resumo, ensure_ascii=False))

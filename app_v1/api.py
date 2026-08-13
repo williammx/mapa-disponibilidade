@@ -419,7 +419,12 @@ def upload_project_file(project_id: str, upload: UploadFile = File(...), kind: s
 @router.get("/files/{file_id}")
 def download_file(file_id: str, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
     asset = db.get(FileAsset, file_id)
-    if not asset or (asset.organization_id and not user_can_access_org(db, user, asset.organization_id)):
+    # Arquivo sem organizacao definida negava a checagem inteira por
+    # curto-circuito e liberava o download para qualquer usuario autenticado.
+    # Sem dono declarado o acesso e negado, nunca liberado.
+    if not asset or not asset.organization_id:
+        raise HTTPException(status_code=404, detail="Arquivo nao encontrado.")
+    if not user_can_access_org(db, user, asset.organization_id):
         raise HTTPException(status_code=404, detail="Arquivo nao encontrado.")
     return FileResponse(storage_path(asset.storage_key), media_type=asset.content_type or "application/octet-stream", filename=asset.original_name)
 

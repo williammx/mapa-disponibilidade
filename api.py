@@ -24,7 +24,15 @@ from models import AuditEvent, EditProposal, Membership, Organization, Project, 
 from app_v1.api import router as api_v1_router
 from app_v1.schemas import SharedEditProposalCreate
 
-app = FastAPI(title="NexoLote")
+# Em producao a documentacao interativa expunha o mapa completo de rotas, schemas
+# e nomes de campo para qualquer visitante anonimo em /docs.
+_DOCS_ENABLED = os.getenv("APP_ENV", "development").lower() != "production"
+app = FastAPI(
+    title="NexoLote",
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+)
 app.include_router(api_v1_router)
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -845,8 +853,29 @@ def read_converter_job(job_id: str) -> dict:
         return json.load(job_file)
 
 
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _safe_project_id(value: str | None) -> str | None:
+    """So aceita identificador opaco. O valor e interpolado dentro de <script>."""
+    if value and _PROJECT_ID_RE.match(value):
+        return value
+    return None
+
+
+def _is_job_owner(job: dict, token: str | None) -> bool:
+    """Confere o token de quem enviou o PDF contra o hash gravado no job."""
+    stored = job.get("owner_token_hash")
+    if not stored or not token:
+        return False
+    return secrets.compare_digest(stored, hash_token(token))
+
+
+_JOB_PRIVATE_KEYS = ("password_hash", "owner_token_hash")
+
+
 def converter_job_data(job: dict, request: Request | None = None) -> dict:
-    payload = {key: value for key, value in job.items() if key != "password_hash"}
+    payload = {key: value for key, value in job.items() if key not in _JOB_PRIVATE_KEYS}
     payload["has_password"] = bool(job.get("password_hash"))
     if job.get("share_token"):
         path = f"/map/{job['share_token']}"
@@ -942,6 +971,10 @@ async def create_converter_job(background_tasks: BackgroundTasks, arquivo: Uploa
             shutil.rmtree(job_dir, ignore_errors=True)
             raise HTTPException(status_code=422, detail="O arquivo enviado nao e um PDF valido.")
 
+    # Sem dono, qualquer pessoa com o job_id podia publicar, despublicar e trocar
+    # a senha do mapa alheio. O token fica so com quem enviou o PDF; no disco
+    # guardamos apenas o hash.
+    owner_token = secrets.token_urlsafe(32)
     job = {
         "id": job_id,
         "status": "queued",
@@ -950,15 +983,17 @@ async def create_converter_job(background_tasks: BackgroundTasks, arquivo: Uploa
         "logs": ["PDF enviado. Processamento iniciado."],
         "filename": filename,
         "quality": quality,
-        "project_id": project_id,
+        "project_id": _safe_project_id(project_id),
         "project_slug": project_slug,
         "published": False,
         "allow_edit": False,
-        "map_url": f"/converter/jobs/{job_id}/map",
+        "owner_token_hash": hash_token(owner_token),
+        "map_url": f"/converter/jobs/{job_id}/map?token={owner_token}",
     }
     write_converter_job(job_id, job)
     background_tasks.add_task(run_converter_job, job_id, title.strip() or "Mapa NexoLote", quality)
-    return {"job": job}
+    return {"job": {**converter_job_data(job, None), "owner_token": owner_token,
+                    "map_url": job["map_url"]}}
 
 
 @app.get("/converter/jobs/{job_id}")
@@ -966,9 +1001,22 @@ def get_converter_job(job_id: str, request: Request):
     return {"job": converter_job_data(read_converter_job(job_id), request)}
 
 
-def converter_editor_controls(job: dict) -> str:
-    job_id = json.dumps(job["id"])
-    project_id = json.dumps(job.get("project_id"))
+def _js_literal(value) -> str:
+    """Serializa para dentro de <script>.
+
+    json.dumps sozinho nao escapa ``</``: um valor contendo ``</script>`` fecha o
+    bloco e injeta HTML arbitrario na pagina.
+    """
+    return (json.dumps(value)
+            .replace("</", "<\\/")
+            .replace(" ", "\\u2028")
+            .replace(" ", "\\u2029"))
+
+
+def converter_editor_controls(job: dict, owner_token: str | None = None) -> str:
+    job_id = _js_literal(job["id"])
+    project_id = _js_literal(job.get("project_id"))
+    owner_query = _js_literal("?token=%s" % owner_token if owner_token else "")
     return f"""
 <style id="maplot-project-controls-style">
   #maplot-project-bar{{position:fixed;z-index:70;top:12px;left:calc(var(--side-w,356px) + 58px);display:flex;align-items:center;gap:8px;padding:6px;border:1px solid #34424b;border-radius:8px;background:rgba(14,22,27,.96);box-shadow:0 14px 36px rgba(0,0,0,.28);font:500 12px system-ui;color:#e9f2ee}}
@@ -1014,7 +1062,7 @@ def converter_editor_controls(job: dict) -> str:
 </aside>
 <script id="maplot-project-controls-script">
 (function(){{
-  var jobId={job_id}, projectId={project_id};
+  var jobId={job_id}, projectId={project_id}, ownerQuery={owner_query};
   var panel=document.getElementById('maplot-share-panel');
   var status=document.getElementById('maplot-project-status');
   var allowEdit=document.getElementById('maplot-allow-edit');
@@ -1060,7 +1108,7 @@ def converter_editor_controls(job: dict) -> str:
     if(requirePassword.checked&&!password.value&&!hasExistingPassword){{feedback.textContent='Defina uma senha para proteger o link.';password.focus();return}}
     button.disabled=true;button.textContent='Publicando...';feedback.textContent='';
     try{{
-      var response=await fetch('/converter/jobs/'+jobId+'/publish',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{allow_edit:allowEdit.checked,require_password:requirePassword.checked,password:password.value||null}})}});
+      var response=await fetch('/converter/jobs/'+jobId+'/publish'+ownerQuery,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{allow_edit:allowEdit.checked,require_password:requirePassword.checked,password:password.value||null}})}});
       var data=await response.json();
       if(!response.ok)throw new Error(data.detail||'Nao foi possivel publicar.');
       updateStatus(data.job);updateLocalProject(data.job);password.value='';feedback.textContent='Mapa publicado. Link pronto para envio.';
@@ -1077,31 +1125,42 @@ def converter_editor_controls(job: dict) -> str:
 """
 
 
-def converter_map_html(job: dict, include_controls: bool, allow_edit: bool = True) -> str:
+def converter_map_html(job: dict, include_controls: bool, allow_edit: bool = True,
+                       owner_token: str | None = None) -> str:
     map_path = converter_job_path(job["id"], "map.html")
     with open(map_path, "r", encoding="utf-8") as map_file:
         html = map_file.read()
-    additions = converter_editor_controls(job) if include_controls else ""
+    additions = converter_editor_controls(job, owner_token) if include_controls else ""
     if not allow_edit:
         additions += """<style id="shared-viewer">#side,#sideToggle,#edit,#editor,#draft,#vertices,#canvasStatus{display:none!important}#lots{pointer-events:none!important}.lot{cursor:default!important}</style><script>window.addEventListener('DOMContentLoaded',function(){var app=document.getElementById('app');if(app)app.classList.add('shared-viewer');});</script>"""
     return html.replace("</body>", additions + "</body>", 1)
 
 
 @app.get("/converter/jobs/{job_id}/map")
-def open_converter_job_map(job_id: str, project_id: str | None = Query(default=None)):
+def open_converter_job_map(job_id: str, project_id: str | None = Query(default=None),
+                           token: str | None = Query(default=None)):
     job = read_converter_job(job_id)
     map_path = converter_job_path(job_id, "map.html")
     if job.get("status") != "completed" or not os.path.isfile(map_path):
         raise HTTPException(status_code=409, detail="O mapa ainda nao esta pronto.")
-    if project_id and job.get("project_id") != project_id[:160]:
-        job["project_id"] = project_id[:160]
+    is_owner = _is_job_owner(job, token)
+    # Sem o token de dono o mapa continua visivel, mas sem a barra que publica,
+    # despublica e troca a senha — e sem poder gravar nada no job.
+    safe_project_id = _safe_project_id(project_id)
+    if is_owner and safe_project_id and job.get("project_id") != safe_project_id:
+        job["project_id"] = safe_project_id
         write_converter_job(job_id, job)
-    return HTMLResponse(converter_map_html(job, include_controls=True), headers={"Cache-Control": "no-store"})
+    return HTMLResponse(
+        converter_map_html(job, include_controls=is_owner, owner_token=token if is_owner else None),
+        headers={"Cache-Control": "no-store"})
 
 
 @app.post("/converter/jobs/{job_id}/publish")
-def publish_converter_job(job_id: str, payload: ConverterPublishPayload, request: Request):
+def publish_converter_job(job_id: str, payload: ConverterPublishPayload, request: Request,
+                          token: str | None = Query(default=None)):
     job = read_converter_job(job_id)
+    if not _is_job_owner(job, token):
+        raise HTTPException(status_code=403, detail="Somente quem enviou o PDF pode publicar este mapa.")
     if job.get("status") != "completed":
         raise HTTPException(status_code=409, detail="Conclua o processamento antes de publicar.")
     if not payload.published:

@@ -26,7 +26,10 @@ export function ClientsPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    // currentTarget e anulado pelo React assim que o handler cede o controle
+    // num await. Guardar a referencia antes e o que mantem o reset() vivo.
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const name = String(form.get("name") ?? "").trim();
     try {
       if (isLocalDemoMode) {
@@ -39,7 +42,7 @@ export function ClientsPage() {
       }
       setShowForm(false);
       setError(null);
-      event.currentTarget.reset();
+      formElement.reset();
       if (!isLocalDemoMode) window.location.reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel criar o cliente.");

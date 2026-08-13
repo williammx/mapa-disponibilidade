@@ -1,0 +1,17 @@
+projeto: NexoLote / mapa-disponibilidade
+modo: REFORMULAR          # triagem: brownfield sem .forja/ preexistente
+fase_atual: 3-arqueologia # Fase 0 lite (brownfield read-only) -> arqueologia
+branch_isolada: pendente  # NON-NEGOTIABLE: criar antes de qualquer alteracao
+checkpoints_humanos_pendentes:
+  - escolha_da_opcao_de_reformulacao
+  - aprovacao_do_corte_de_mvp
+trabalho_ja_entregue_nesta_sessao:
+  - correcao_do_motor_de_geometria   # tesselacao adaptativa de curvas
+  - escolha_de_motor_por_qualidade
+  - quadra_generica_e_nome_unico
+  - contagem_de_cantos_invariante
+  - suite_tools/qa_mapa.py + tmp/qa/baseline.json
+arvore_suja_ao_iniciar:
+  - pdf_to_map.py (alteracoes desta sessao, nao commitadas)
+  - tools/qa_mapa.py (novo, nao commitado)
+  - 56 arquivos com ruido de CRLF (nao sao alteracoes reais)

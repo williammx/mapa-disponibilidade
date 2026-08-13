@@ -31,7 +31,7 @@ services:
       PORT: "7860"
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mapa:mapa-local@db:5432/mapa}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
       SESSION_DAYS: ${SESSION_DAYS:-14}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       SETUP_TOKEN: ${SETUP_TOKEN:-}

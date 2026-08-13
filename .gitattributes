@@ -1,3 +1,13 @@
+# Fim de linha normalizado no repositorio (LF). Sem isto, o mesmo arquivo
+# aparecia inteiro como modificado ao trocar de maquina/editor: 56 arquivos
+# e 10.357 linhas de diferenca que eram so CRLF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.pdf binary
+
 *.7z filter=lfs diff=lfs merge=lfs -text
 *.arrow filter=lfs diff=lfs merge=lfs -text
 *.bin filter=lfs diff=lfs merge=lfs -text

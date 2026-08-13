@@ -16,6 +16,19 @@ jobs:
   validate:
     name: Validate application
     runs-on: ubuntu-latest
+    services:
+      # A migration nunca havia rodado contra Postgres antes de producao.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: mapa_ci
+          POSTGRES_USER: mapa
+          POSTGRES_PASSWORD: mapa-ci
+        options: >-
+          --health-cmd "pg_isready -U mapa -d mapa_ci"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,12 +42,32 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest
+          python -m pip install -r requirements.txt pytest httpx
 
       - name: Run Python checks
         run: |
           python -m py_compile api.py pdf_to_map.py
           python -m pytest -q
+
+      - name: Migration against a real empty Postgres
+        env:
+          DATABASE_URL: postgresql+psycopg://mapa:mapa-ci@127.0.0.1:5432/mapa_ci
+        run: |
+          set -euo pipefail
+          python -m alembic upgrade head
+          # Toda tabela declarada em models.py precisa existir depois do upgrade.
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, inspect
+          import models
+          engine = create_engine(os.environ["DATABASE_URL"])
+          existing = set(inspect(engine).get_table_names())
+          expected = set(models.Base.metadata.tables)
+          missing = expected - existing
+          if missing:
+              raise SystemExit("migration nao criou: %s" % sorted(missing))
+          print("migration criou as %d tabelas de models.py" % len(expected))
+          PY
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -103,12 +136,37 @@ jobs:
           APP_DIR="/opt/mapa-disponibilidade"
           ARCHIVE="/tmp/mapa-disponibilidade-${SHA}.tar.gz"
           RELEASE_DIR="/tmp/mapa-disponibilidade-${SHA}"
+          BACKUP_DIR="/var/backups/mapa-disponibilidade"
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
           rm -rf "$RELEASE_DIR"
           mkdir -p "$RELEASE_DIR"
           tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
 
           test -f "$APP_DIR/.env"
+
+          # ---- Rede de seguranca ANTES de qualquer coisa destrutiva ----
+          # O rsync abaixo usa --delete e o container roda `alembic upgrade head`
+          # no boot. Sem dump previo, um deploy ruim nao tinha volta.
+          cd "$APP_DIR"
+          sudo mkdir -p "$BACKUP_DIR"
+          if ! sudo docker compose exec -T db sh -c \
+              'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+              | sudo tee "$BACKUP_DIR/pre-deploy-${STAMP}.sql" >/dev/null; then
+            echo "ABORTADO: nao consegui gerar o backup do Postgres antes do deploy."
+            exit 1
+          fi
+          if [ ! -s "$BACKUP_DIR/pre-deploy-${STAMP}.sql" ]; then
+            echo "ABORTADO: o dump saiu vazio."
+            exit 1
+          fi
+          sudo gzip -f "$BACKUP_DIR/pre-deploy-${STAMP}.sql"
+          echo "Backup: $BACKUP_DIR/pre-deploy-${STAMP}.sql.gz ($(sudo du -h "$BACKUP_DIR/pre-deploy-${STAMP}.sql.gz" | cut -f1))"
+          # Guarda a versao anterior para permitir voltar sem depender do GitHub.
+          sudo rm -rf "$APP_DIR.previous"
+          sudo cp -a "$APP_DIR" "$APP_DIR.previous"
+          sudo find "$BACKUP_DIR" -name 'pre-deploy-*.sql.gz' -mtime +14 -delete || true
+
           sudo rsync -a --delete \
             --exclude=.env \
             "$RELEASE_DIR/" "$APP_DIR/"
@@ -121,7 +179,17 @@ jobs:
           for attempt in $(seq 1 30); do
             if curl --fail --silent --show-error http://127.0.0.1:8000/health >/dev/null; then
               docker compose ps
+              # A fila e um servico separado: um web verde com worker morto
+              # significa conversao que nunca termina, e o deploy passava assim.
+              if [ "$(docker compose ps -q worker | wc -l)" -eq 0 ] || \
+                 [ "$(docker inspect -f '{{.State.Running}}' mapa-worker 2>/dev/null)" != "true" ]; then
+                echo "FALHA: a aplicacao subiu mas o worker da fila nao esta rodando."
+                docker compose logs --tail=80 worker
+                exit 1
+              fi
               rm -rf "$RELEASE_DIR" "$ARCHIVE"
+              echo "Backup desta entrega: $BACKUP_DIR/pre-deploy-${STAMP}.sql.gz"
+              echo "Versao anterior preservada em: $APP_DIR.previous"
               exit 0
             fi
             sleep 4
@@ -129,5 +197,28 @@ jobs:
 
           docker compose ps
           docker compose logs --tail=120 mapa-disponibilidade
+          echo "----------------------------------------------------------"
+          echo "DEPLOY FALHOU. Para voltar ao estado anterior, na VPS:"
+          echo "  sudo rsync -a --delete $APP_DIR.previous/ $APP_DIR/"
+          echo "  cd $APP_DIR && sudo docker compose up -d --build"
+          echo "  gunzip -c $BACKUP_DIR/pre-deploy-${STAMP}.sql.gz | sudo docker compose exec -T db psql -U \$POSTGRES_USER -d \$POSTGRES_DB"
+          echo "----------------------------------------------------------"
           exit 1
           REMOTE
+
+      - name: Verificacao externa em producao
+        env:
+          PUBLIC_URL: https://map.eterhub.com.br
+        run: |
+          set -euo pipefail
+          # O health check anterior roda em loopback dentro da VPS: ele nao prova
+          # que o Nginx e o TLS estao entregando a aplicacao para o usuario.
+          for attempt in $(seq 1 10); do
+            if curl --fail --silent --show-error --max-time 15 "$PUBLIC_URL/health" >/dev/null; then
+              echo "Producao respondendo em $PUBLIC_URL/health"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "A aplicacao subiu na VPS mas nao respondeu publicamente em $PUBLIC_URL/health"
+          exit 1

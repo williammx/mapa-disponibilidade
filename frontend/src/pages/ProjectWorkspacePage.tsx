@@ -60,7 +60,10 @@ export function ProjectWorkspacePage() {
   async function handleAccessSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!project) return;
-    const delivery = deliverySettings(project, event.currentTarget);
+    // Guardado antes de qualquer await: o React anula currentTarget quando o
+    // handler cede o controle.
+    const formElement = event.currentTarget;
+    const delivery = deliverySettings(project, formElement);
     try {
       if (isLocalDemoMode) {
         updateProject(project.id, {
@@ -69,7 +72,7 @@ export function ProjectWorkspacePage() {
           passwordEnabled: delivery.visibility === "password" && Boolean(delivery.password || project.passwordEnabled),
         });
       } else if (project.status === "published") {
-        await publish(event.currentTarget);
+        await publish(formElement);
         return;
       } else {
         await apiRequest(`/api/v1/projects/${project.id}`, {

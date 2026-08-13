@@ -12,7 +12,9 @@ from models import AuditEvent, Session, User, utcnow
 
 COOKIE_NAME = "mapa_session"
 SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
-COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+# Default seguro: so cai para cookie sem Secure quando alguem pedir
+# explicitamente (desenvolvimento local em http).
+COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").lower() != "false"
 password_hash = PasswordHash.recommended()
 
 

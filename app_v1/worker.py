@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 
 import pdf_to_map
@@ -23,27 +24,74 @@ def update_job(db, job: ProcessingJob, progress: int, step: str) -> None:
     db.commit()
 
 
+# O conversor devolve o status como indice (0/1/2) na mesma ordem de
+# pdf_to_map.STATUS_NAMES; o banco guarda o vocabulario em ingles de
+# app_v1/schemas.py:42.
+STATUS_BY_INDEX = ("available", "sold", "reserved")
+
+
+def _parse_points(raw) -> list[list[float]]:
+    """Converte "x,y x,y ..." (formato do conversor) em lista de pares."""
+    if isinstance(raw, (list, tuple)):
+        return [[float(point[0]), float(point[1])] for point in raw
+                if isinstance(point, (list, tuple)) and len(point) >= 2]
+    points = []
+    for pair in str(raw or "").split():
+        x, _, y = pair.partition(",")
+        try:
+            points.append([float(x), float(y)])
+        except ValueError:
+            continue
+    return points
+
+
+def _parse_area(raw) -> float | None:
+    """Extrai o numero de textos como "178.86m2" / "1.234,56 m²"."""
+    if isinstance(raw, (int, float)):
+        return float(raw) or None
+    match = re.search(r"\d+(?:[.,]\d+)?", str(raw or ""))
+    if not match:
+        return None
+    try:
+        value = float(match.group(0).replace(",", "."))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def extract_lots_from_info(info: dict, project_id: str, version_id: str) -> list[Lot]:
+    """Traduz o retorno de pdf_to_map.convert() em linhas da tabela Lot.
+
+    O contrato e o de ``pdf_to_map._normalize_lot``: cada item traz ``nome``,
+    ``quadra``, ``area`` (texto), ``color``, ``pts`` (string "x,y x,y") e ``s``
+    (indice de status). Ler chaves que o conversor nunca produziu — como
+    ``points`` ou ``status`` — devolve lista vazia silenciosamente.
+    """
     raw_lots = info.get("data") or info.get("lots") or []
     lots: list[Lot] = []
     for index, item in enumerate(raw_lots):
-        name = item.get("nome") or item.get("name") or item.get("label")
-        block = item.get("quadra") or item.get("block") or item.get("area")
-        geometry = item.get("points") or item.get("polygon") or item.get("geometry") or []
-        if isinstance(geometry, dict):
-            geometry_json = geometry
-        else:
-            geometry_json = {"points": geometry}
+        if not isinstance(item, dict):
+            continue
+        points = _parse_points(item.get("pts") or item.get("points"))
+        try:
+            status_index = int(item.get("s", 0) or 0)
+        except (TypeError, ValueError):
+            status_index = 0
+        status = (STATUS_BY_INDEX[status_index]
+                  if 0 <= status_index < len(STATUS_BY_INDEX) else "available")
+        # external_id tem unicidade por versao: o indice do conversor e a unica
+        # chave garantidamente unica (nomes de lote se repetem entre quadras).
+        external_id = str(item.get("index", index))
         lots.append(Lot(
             project_id=project_id,
             project_version_id=version_id,
-            external_id=str(item.get("id") or item.get("external_id") or index + 1),
-            name=name,
-            block=block,
-            area_m2=item.get("area_m2") or item.get("area"),
-            status=item.get("status") or "available",
-            color=item.get("color") or item.get("cor"),
-            geometry_json=json.dumps(geometry_json, ensure_ascii=False),
+            external_id=external_id,
+            name=item.get("nome") or item.get("name") or None,
+            block=item.get("quadra") or item.get("block") or None,
+            area_m2=_parse_area(item.get("area_m2") or item.get("area")),
+            status=status,
+            color=item.get("color") or item.get("cor") or None,
+            geometry_json=json.dumps({"points": points}, ensure_ascii=False),
             properties_json=json.dumps(item, ensure_ascii=False),
             sort_order=index,
         ))
@@ -92,6 +140,15 @@ def run_processing_job(job_id: str) -> None:
             version.source_pdf_path = str(storage_path(pdf_key))
             version.map_html_path = str(storage_path(html_key))
             lots = extract_lots_from_info(info, project.id, version.id)
+            # Se o conversor achou lotes e nada chegou na tabela, o contrato
+            # entre os dois quebrou. Falhar alto e melhor que publicar um mapa
+            # vazio com laudo de validacao verde.
+            if version.lot_count and not lots:
+                raise RuntimeError(
+                    "O conversor devolveu %d lotes mas nenhum foi convertido para "
+                    "a tabela Lot. Contrato de dados quebrado entre "
+                    "pdf_to_map.convert() e extract_lots_from_info()."
+                    % version.lot_count)
             db.add_all(lots)
             db.flush()
             summary = validate_lots(lots)
