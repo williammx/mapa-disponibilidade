@@ -1,4 +1,4 @@
-import { ArrowSquareOut, CheckCircle, Copy, Eye, FilePdf, FloppyDisk, LockKey, Play, UploadSimple, WarningCircle } from "@phosphor-icons/react";
+import { ArrowSquareOut, CheckCircle, Copy, Eye, FilePdf, FloppyDisk, LockKey, Play, ShieldCheck, UploadSimple, WarningCircle } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -11,6 +11,18 @@ type Tab = (typeof tabs)[number];
 type ShareLink = { id: string; url: string | null; has_password: boolean; access_mode: string; allow_edit: boolean; active: boolean };
 type PublishResponse = { project: Project; share_link: ShareLink };
 type EditProposal = { id: string; title: string; summary: string | null; status: string; changes: { lots?: unknown[] }; created_at: string };
+// Formato devolvido por validate_lots em app_v1/validation.py.
+type ValidationIssue = { type: string; severity: string; lot_id: string; message: string };
+type ValidationSummary = {
+  lot_count: number;
+  issue_count: number;
+  error_count: number;
+  warning_count: number;
+  issues: ValidationIssue[];
+};
+type IssueGroup = { type: string; severity: string; total: number; issues: ValidationIssue[] };
+
+const MAX_ISSUES_PER_GROUP = 20;
 
 export function ProjectWorkspacePage() {
   const { projectId } = useParams();
@@ -298,7 +310,7 @@ export function ProjectWorkspacePage() {
 
       <div className="flex gap-2 overflow-x-auto border-b border-white/10 pb-2">
         {tabs.map((tab) => (
-          <button key={tab} onClick={() => setActiveTab(tab)} className={`shrink-0 rounded-[8px] px-4 py-2 text-sm font-medium transition ${activeTab === tab ? "bg-emerald-400 text-slate-950" : "bg-white/6 text-slate-300 hover:bg-white/10"}`}>
+          <button key={tab} onClick={() => setActiveTab(tab)} aria-current={activeTab === tab ? "page" : undefined} className={`shrink-0 rounded-[8px] px-4 py-2 text-sm font-medium transition focus-visible:ring-2 focus-visible:ring-emerald-300 ${activeTab === tab ? "bg-emerald-400 text-slate-950" : "bg-white/6 text-slate-300 hover:bg-white/10"}`}>
             {tab}
           </button>
         ))}
@@ -306,7 +318,9 @@ export function ProjectWorkspacePage() {
 
       {activeTab === "Visao geral" ? <Overview project={project} onSubmit={handleDetailsSubmit} /> : null}
       {activeTab === "Mapa e editor" ? <Editor project={project} shareUrl={shareUrl} onPdfChange={handlePdfChange} onQualityChange={handleQualityChange} onRetry={() => document.getElementById("workspace-pdf")?.click()} /> : null}
-      {activeTab === "Validacao" ? <Validation projectId={project.id} /> : null}
+      {activeTab === "Validacao" ? (
+        <Validation projectId={project.id} versionId={response.data?.latest_version?.id ?? null} versionLoading={response.loading} />
+      ) : null}
       {activeTab === "Versoes" ? <Versions project={project} onPublish={publish} /> : null}
       {activeTab === "Publicacao" ? <Publication project={project} shareUrl={shareUrl} onSubmit={handleAccessSubmit} onCopy={copyLink} onPublish={publish} /> : null}
       {activeTab === "Acessos" ? <Access project={project} shareUrl={shareUrl} /> : null}
@@ -464,9 +478,31 @@ function processingLabel(status: Project["processingStatus"]) {
   return "Sem PDF";
 }
 
-function Validation({ projectId }: { projectId: string }) {
+function Validation({ projectId, versionId, versionLoading }: { projectId: string; versionId: string | null; versionLoading: boolean }) {
   const response = useApi<{ edit_proposals: EditProposal[] }>(`/api/v1/projects/${projectId}/edit-proposals`);
   const [statusPatch, setStatusPatch] = useState<Record<string, string>>({});
+  const [summary, setSummary] = useState<ValidationSummary | null>(null);
+  const [validating, setValidating] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const groups = useMemo(() => issueGroups(summary), [summary]);
+
+  async function runValidation() {
+    if (!versionId || validating) return;
+    setValidating(true);
+    setValidationError(null);
+    try {
+      const payload = await apiRequest<{ validation: ValidationSummary }>(`/api/v1/project-versions/${versionId}/validate`, {
+        method: "POST",
+      });
+      setSummary(payload.validation);
+    } catch (error) {
+      // O resultado anterior deixa de valer quando a nova checagem falha.
+      setSummary(null);
+      setValidationError(error instanceof Error ? error.message : "Nao foi possivel validar a versao.");
+    } finally {
+      setValidating(false);
+    }
+  }
 
   async function decide(proposalId: string, decision: "accept" | "reject") {
     try {
@@ -482,21 +518,98 @@ function Validation({ projectId }: { projectId: string }) {
 
   return (
     <section className="space-y-7">
-      <div className="grid gap-4 md:grid-cols-2">
-        {[
-          ["Lotes sem nome", "Revise os itens sem identificacao no editor", false],
-          ["Geometrias invalidas", "Consulte o relatorio da versao atual", true],
-          ["Possiveis lotes agrupados", "Verifique quadras com areas muito grandes", false],
-          ["Sobreposicoes", "Valide os limites antes de publicar", true],
-        ].map(([label, detail, ok]) => (
-          <div key={String(label)} className="rounded-[8px] border border-white/10 p-5">
-            <div className="flex items-center gap-3">
-              {ok ? <CheckCircle className="text-emerald-300" size={22} weight="fill" /> : <WarningCircle className="text-orange-300" size={22} weight="bold" />}
-              <h3 className="font-medium">{label}</h3>
-            </div>
-            <p className="mt-3 text-sm text-slate-400">{detail}</p>
+      <div className="rounded-[8px] border border-white/10 bg-white/4 p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="text-2xl font-medium">Validacao da versao</h2>
+            <p className="mt-2 max-w-2xl text-slate-400">
+              A checagem roda no servidor sobre os lotes da versao mais recente e aponta geometrias invalidas, nomes duplicados e areas inconsistentes antes da publicacao.
+            </p>
           </div>
-        ))}
+          <button
+            type="button"
+            onClick={runValidation}
+            disabled={!versionId || validating}
+            className="inline-flex shrink-0 items-center gap-2 rounded-[8px] bg-emerald-400 px-4 py-3 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <ShieldCheck size={17} weight="bold" />
+            {validating ? "Validando..." : summary ? "Validar novamente" : "Executar validacao"}
+          </button>
+        </div>
+
+        <div className="mt-6">
+          {!versionId ? (
+            <p role="status" className={`rounded-[8px] border p-4 text-sm ${versionLoading ? "border-white/10 bg-black/20 text-slate-400" : "border-orange-300/25 bg-orange-300/8 text-orange-100"}`}>
+              {versionLoading
+                ? "Carregando a versao mais recente do projeto..."
+                : "Nenhuma versao gerada para este projeto. Envie o PDF na aba Mapa e editor para criar a primeira versao e liberar a validacao."}
+            </p>
+          ) : validating ? (
+            <p role="status" className="rounded-[8px] border border-white/10 bg-black/20 p-4 text-sm text-slate-300">
+              Validando os lotes da versao atual...
+            </p>
+          ) : validationError ? (
+            <p role="status" className="rounded-[8px] border border-orange-300/25 bg-orange-300/8 p-4 text-sm text-orange-100">
+              {validationError}
+            </p>
+          ) : !summary ? (
+            <p className="rounded-[8px] border border-white/10 bg-black/20 p-4 text-sm text-slate-400">
+              Nenhuma checagem executada nesta sessao. Use o botao acima para validar a versao atual antes de publicar.
+            </p>
+          ) : (
+            <div className="space-y-6">
+              <p role="status" className={`rounded-[8px] border p-4 text-sm ${summary.error_count ? "border-orange-300/25 bg-orange-300/8 text-orange-100" : "border-emerald-300/25 bg-emerald-300/8 text-emerald-100"}`}>
+                Validacao concluida: {countLabel(summary.error_count, "erro", "erros")} e {countLabel(summary.warning_count, "aviso", "avisos")} em {countLabel(summary.lot_count, "lote", "lotes")}.
+              </p>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Metric label="Lotes analisados" value={summary.lot_count} />
+                <Metric label="Erros" value={<span className={summary.error_count ? "text-orange-200" : "text-emerald-200"}>{summary.error_count}</span>} />
+                <Metric label="Avisos" value={<span className={summary.warning_count ? "text-orange-100" : "text-emerald-200"}>{summary.warning_count}</span>} />
+              </div>
+              {groups.length ? (
+                <div className="divide-y divide-white/8 rounded-[8px] border border-white/10">
+                  {groups.map((group) => (
+                    <article key={group.type} className="p-5">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <WarningCircle className={group.severity === "error" ? "text-orange-300" : "text-slate-300"} size={22} weight="bold" />
+                        <h3 className="font-medium">{issueTypeLabel(group.type)}</h3>
+                        <span className="rounded-[8px] bg-white/8 px-2 py-1 text-xs font-medium text-slate-300">
+                          {countLabel(group.total, "ocorrencia", "ocorrencias")}
+                        </span>
+                        <span className={`text-xs uppercase tracking-[0.14em] ${group.severity === "error" ? "text-orange-300" : "text-slate-400"}`}>
+                          {group.severity === "error" ? "erro" : "aviso"}
+                        </span>
+                      </div>
+                      <ul className="mt-4 space-y-2 text-sm text-slate-300">
+                        {group.issues.map((issue, index) => (
+                          <li key={`${issue.type}-${issue.lot_id}-${index}`} className="flex gap-2">
+                            <span className="mt-2 size-1.5 shrink-0 rounded-full bg-emerald-300" />
+                            <span>
+                              {issue.message} <span className="text-slate-500">Lote {issue.lot_id}</span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      {group.total > group.issues.length ? (
+                        <p className="mt-3 text-xs text-slate-500">Exibindo {group.issues.length} de {group.total} ocorrencias deste tipo.</p>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 rounded-[8px] border border-emerald-300/25 bg-emerald-300/8 p-5">
+                  <CheckCircle className="shrink-0 text-emerald-300" size={22} weight="fill" />
+                  <p className="text-sm text-emerald-100">Nenhum problema encontrado nos lotes desta versao.</p>
+                </div>
+              )}
+              {summary.issue_count > summary.issues.length ? (
+                <p className="text-xs text-slate-500">
+                  O servidor detalha no maximo 500 ocorrencias por execucao; {summary.issue_count} foram contadas nesta versao.
+                </p>
+              ) : null}
+            </div>
+          )}
+        </div>
       </div>
       <div className="rounded-[8px] border border-white/10">
         <div className="border-b border-white/10 p-5">
@@ -516,8 +629,8 @@ function Validation({ projectId }: { projectId: string }) {
                   </div>
                   {proposalStatus === "pending" ? (
                     <div className="flex gap-2">
-                      <button onClick={() => decide(proposal.id, "reject")} className="rounded-[8px] border border-white/12 px-3 py-2 text-sm">Recusar</button>
-                      <button onClick={() => decide(proposal.id, "accept")} className="rounded-[8px] bg-emerald-400 px-3 py-2 text-sm font-medium text-slate-950">Aceitar para revisao</button>
+                      <button onClick={() => decide(proposal.id, "reject")} className="rounded-[8px] border border-white/12 px-3 py-2 text-sm transition hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-emerald-300">Recusar</button>
+                      <button onClick={() => decide(proposal.id, "accept")} className="rounded-[8px] bg-emerald-400 px-3 py-2 text-sm font-medium text-slate-950 transition hover:bg-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-300">Aceitar para revisao</button>
                     </div>
                   ) : null}
                 </article>
@@ -679,6 +792,36 @@ function Row({ icon, label, ok = false }: { icon: ReactNode; label: string; ok?:
       <span className={ok ? "text-emerald-300" : "text-orange-300"}>{ok ? "pronto" : "pendente"}</span>
     </div>
   );
+}
+
+function issueGroups(summary: ValidationSummary | null): IssueGroup[] {
+  if (!summary) return [];
+  const groups = new Map<string, IssueGroup>();
+  for (const issue of summary.issues) {
+    const group = groups.get(issue.type) ?? { type: issue.type, severity: issue.severity, total: 0, issues: [] };
+    group.total += 1;
+    // Um unico item com severidade error basta para o grupo inteiro contar como bloqueio.
+    if (issue.severity === "error") group.severity = "error";
+    if (group.issues.length < MAX_ISSUES_PER_GROUP) group.issues.push(issue);
+    groups.set(issue.type, group);
+  }
+  return [...groups.values()].sort((a, b) => {
+    if (a.severity !== b.severity) return a.severity === "error" ? -1 : 1;
+    return b.total - a.total;
+  });
+}
+
+function issueTypeLabel(type: string) {
+  if (type === "missing_name") return "Lotes sem nome";
+  if (type === "duplicate_name") return "Nomes duplicados";
+  if (type === "invalid_geometry_json") return "Geometria com JSON invalido";
+  if (type === "invalid_geometry") return "Geometria com menos de 3 pontos";
+  if (type === "invalid_area") return "Area invalida";
+  return type;
+}
+
+function countLabel(value: number, singular: string, plural: string) {
+  return `${value} ${value === 1 ? singular : plural}`;
 }
 
 function statusLabel(status: string) {

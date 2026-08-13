@@ -45,3 +45,6 @@ frontend/.vite/
 
 # Pasta criada por engano por um npm com caminho absoluto do Windows
 frontend/C:*
+
+# Saida temporaria de QA da landing
+outputs/

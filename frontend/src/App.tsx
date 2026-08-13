@@ -1,5 +1,5 @@
 import { Route, Routes } from "react-router-dom";
-import { AppShell } from "./components/AppShell";
+import { AppShell, RequirePlatformAdmin } from "./components/AppShell";
 import { LandingPage } from "./pages/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -31,7 +31,14 @@ export function App() {
           <Route path="atividade" element={<ActivityPage />} />
           <Route path="perfil" element={<ProfilePage />} />
           <Route path="preferencias" element={<PreferencesPage />} />
-          <Route path="admin" element={<AdminPage />} />
+          <Route
+            path="admin"
+            element={
+              <RequirePlatformAdmin>
+                <AdminPage />
+              </RequirePlatformAdmin>
+            }
+          />
           <Route path="projetos/:projectId" element={<ProjectWorkspacePage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

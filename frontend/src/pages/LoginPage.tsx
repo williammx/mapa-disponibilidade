@@ -65,7 +65,15 @@ export function LoginPage() {
   return (
     <main className="grid min-h-[100dvh] bg-[#081014] text-white lg:grid-cols-[1fr_520px]">
       <section className="relative hidden overflow-hidden lg:block">
-        <img src="/hero-loteamento-aereo.png" alt="Loteamento visto do alto" className="absolute inset-0 h-full w-full object-cover" />
+        <img
+          src="/hero-noturno-1600.webp"
+          srcSet="/hero-noturno-1000.webp 1000w, /hero-noturno-1600.webp 1600w"
+          sizes="(max-width: 1024px) 100vw, 50vw"
+          alt="Loteamento visto do alto ao anoitecer"
+          loading="lazy"
+          decoding="async"
+          className="absolute inset-0 h-full w-full object-cover"
+        />
         <div className="absolute inset-0 bg-[#07100e]/62" />
         <div className="relative z-10 flex h-full flex-col justify-end p-12">
           <p className="max-w-lg text-4xl font-medium leading-tight tracking-tight">Operacao de mapas, clientes e entregas em um unico painel.</p>

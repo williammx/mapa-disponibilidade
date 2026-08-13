@@ -70,7 +70,7 @@ export function PublicMapPage() {
         </section>
       ) : (
         <section className="relative min-h-[calc(100dvh-89px)] overflow-hidden">
-          <img src="/hero-loteamento-aereo.png" alt="Mapa publicado do empreendimento" className="absolute inset-0 h-full w-full object-cover" style={{ transform: `scale(${zoom})`, transformOrigin: "center" }} />
+          <img src="/hero-noturno-1600.webp" alt="Mapa publicado do empreendimento" className="absolute inset-0 h-full w-full object-cover" style={{ transform: `scale(${zoom})`, transformOrigin: "center" }} />
           <div className="absolute inset-0 bg-white/10" />
           <div className="absolute left-5 top-5 rounded-[8px] border border-white/60 bg-white/88 p-4 shadow-[0_24px_70px_-34px_rgba(0,0,0,0.55)] backdrop-blur-md">
             <div className="flex items-center gap-3">

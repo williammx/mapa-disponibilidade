@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session as DbSession
 
 import pdf_to_map
+import rate_limit
 from auth import COOKIE_NAME, audit, clear_session, current_user, hash_token, normalize_email, password_hash, require_platform_admin, set_session
 from database import Base, engine, get_db
 from models import AuditEvent, EditProposal, Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
@@ -343,11 +344,17 @@ def setup_first_admin(payload: SetupPayload, response: Response, db: DbSession =
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginPayload, response: Response, db: DbSession = Depends(get_db)):
+def login(payload: LoginPayload, request: Request, response: Response, db: DbSession = Depends(get_db)):
     email = validate_email(payload.email)
+    attempts = rate_limit.password_attempts("login", email, request)
+    # Antes de verificar o hash: assim a conta bloqueada tambem para de gastar
+    # CPU de argon2 a cada chute.
+    attempts.enforce()
     user = db.query(User).filter(User.email == email).first()
     if not user or not user.active or not password_hash.verify(payload.password, user.password_hash):
+        attempts.register_failure()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email ou senha invalidos.")
+    attempts.clear()
     user.last_login_at = utcnow()
     audit(db, "login", "user", actor=user, target_id=user.id)
     set_session(response, db, user)
@@ -722,8 +729,12 @@ def unlock_shared_project(token: str, request: Request, password: str = Form(...
         user = authenticated_request_user(request, db)
         if not user or not can_access_organization(db, user, project.organization_id):
             raise HTTPException(status_code=403, detail="Este usuario nao possui acesso ao projeto.")
+    attempts = rate_limit.password_attempts("share_link", token, request)
+    attempts.enforce()
     if not link.password_hash or not password_hash.verify(password, link.password_hash):
+        attempts.register_failure()
         raise HTTPException(status_code=403, detail="Senha invalida.")
+    attempts.clear()
     version = latest_version(db, project.id, published_only=True)
     if not version:
         raise HTTPException(status_code=404, detail="Mapa nao publicado.")
@@ -1199,9 +1210,10 @@ def find_converter_job_by_token(token: str) -> dict:
     raise HTTPException(status_code=404, detail="Mapa nao encontrado.")
 
 
-def converter_password_page(token: str, error: str = "") -> HTMLResponse:
+def converter_password_page(token: str, error: str = "", status_code: int = 200,
+                            headers: dict | None = None) -> HTMLResponse:
     error_html = f'<p style="color:#b42318">{error}</p>' if error else ""
-    return HTMLResponse(f"""<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Mapa protegido</title><body style="margin:0;background:#081014;color:#f4f7f5;font:15px system-ui"><form method="post" style="width:min(420px,calc(100% - 32px));margin:15vh auto;padding:28px;border:1px solid #31404a;border-radius:8px;background:#10191f"><p style="color:#35d894;text-transform:uppercase;font-size:11px;letter-spacing:.16em">acesso protegido</p><h1 style="font-size:25px;font-weight:500">Digite a senha do mapa</h1><p style="color:#9babb3">Use a senha enviada junto com o link.</p>{error_html}<input name="password" type="password" required autofocus style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #41515b;border-radius:6px;background:#081014;color:white"><button style="width:100%;margin-top:12px;padding:12px;border:0;border-radius:6px;background:#35d894;color:#06291b;font-weight:600">Abrir mapa</button></form></body></html>""")
+    return HTMLResponse(status_code=status_code, headers=headers, content=f"""<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Mapa protegido</title><body style="margin:0;background:#081014;color:#f4f7f5;font:15px system-ui"><form method="post" style="width:min(420px,calc(100% - 32px));margin:15vh auto;padding:28px;border:1px solid #31404a;border-radius:8px;background:#10191f"><p style="color:#35d894;text-transform:uppercase;font-size:11px;letter-spacing:.16em">acesso protegido</p><h1 style="font-size:25px;font-weight:500">Digite a senha do mapa</h1><p style="color:#9babb3">Use a senha enviada junto com o link.</p>{error_html}<input name="password" type="password" required autofocus style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #41515b;border-radius:6px;background:#081014;color:white"><button style="width:100%;margin-top:12px;padding:12px;border:0;border-radius:6px;background:#35d894;color:#06291b;font-weight:600">Abrir mapa</button></form></body></html>""")
 
 
 @app.get("/map/{token}")
@@ -1213,10 +1225,21 @@ def shared_converter_map(token: str):
 
 
 @app.post("/map/{token}")
-def unlock_shared_converter_map(token: str, password: str = Form(...)):
+def unlock_shared_converter_map(token: str, request: Request, password: str = Form(...)):
+    attempts = rate_limit.password_attempts("converter_map", token, request)
+    # Aqui o formulario e HTML, entao o bloqueio volta como pagina de senha com
+    # 429 em vez do JSON de erro que os outros endpoints usam.
+    blocked_for = attempts.retry_after()
+    if blocked_for:
+        return converter_password_page(
+            token, rate_limit.blocked_message(blocked_for),
+            status_code=429, headers={"Retry-After": str(blocked_for)},
+        )
     job = find_converter_job_by_token(token)
     if not job.get("password_hash") or not password_hash.verify(password, job["password_hash"]):
+        attempts.register_failure()
         return converter_password_page(token, "Senha incorreta.")
+    attempts.clear()
     return HTMLResponse(converter_map_html(job, include_controls=False, allow_edit=bool(job.get("allow_edit"))), headers={"Cache-Control": "no-store"})
 
 
