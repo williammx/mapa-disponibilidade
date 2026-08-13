@@ -219,12 +219,35 @@ def legacy_generator():
     return FileResponse(os.path.join(HERE, "index.html"))
 
 
-@app.get("/hero-loteamento-aereo.png")
-def frontend_hero_image():
-    hero = os.path.join(FRONTEND_DIST, "hero-loteamento-aereo.png")
-    if os.path.isfile(hero):
-        return FileResponse(hero, media_type="image/png")
-    raise HTTPException(status_code=404, detail="Imagem nao encontrada.")
+_STATIC_ROOT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
+_STATIC_TYPES = {
+    ".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+    ".webmanifest": "application/manifest+json", ".txt": "text/plain",
+    ".xml": "application/xml",
+}
+
+
+def _frontend_public_file(filename: str):
+    """Arquivo da pasta public/ do Vite, servido da raiz do site.
+
+    Antes existia uma rota codificada por arquivo — a imagem nova do hero deu 404
+    em producao justamente por isso. Aqui o nome e validado contra um padrao sem
+    barra nem ponto-ponto e o caminho resolvido tem que continuar dentro do dist,
+    entao nao da para escapar do diretorio.
+    """
+    if not _STATIC_ROOT_RE.match(filename):
+        return None
+    media_type = _STATIC_TYPES.get(os.path.splitext(filename)[1].lower())
+    if not media_type:
+        return None
+    caminho = os.path.realpath(os.path.join(FRONTEND_DIST, filename))
+    if not caminho.startswith(os.path.realpath(FRONTEND_DIST) + os.sep):
+        return None
+    if not os.path.isfile(caminho):
+        return None
+    return FileResponse(caminho, media_type=media_type,
+                        headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.get("/entrar")
@@ -1256,3 +1279,13 @@ async def render(payload: dict = Body(...)):
     except Exception as exc:
         return JSONResponse({"erro": str(exc)}, status_code=400)
     return HTMLResponse(content=html)
+
+
+# Registrada por ultimo de proposito: o Starlette casa as rotas na ordem de
+# definicao, entao toda rota explicita acima continua ganhando desta.
+@app.get("/{filename}")
+def frontend_public_asset(filename: str):
+    resposta = _frontend_public_file(filename)
+    if resposta is None:
+        raise HTTPException(status_code=404, detail="Arquivo nao encontrado.")
+    return resposta

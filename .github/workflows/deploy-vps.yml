@@ -156,12 +156,28 @@ jobs:
           set -euo pipefail
           # O health check anterior roda em loopback dentro da VPS: ele nao prova
           # que o Nginx e o TLS estao entregando a aplicacao para o usuario.
+          pronto=0
           for attempt in $(seq 1 10); do
             if curl --fail --silent --show-error --max-time 15 "$PUBLIC_URL/health" >/dev/null; then
-              echo "Producao respondendo em $PUBLIC_URL/health"
-              exit 0
+              pronto=1
+              break
             fi
             sleep 6
           done
-          echo "A aplicacao subiu na VPS mas nao respondeu publicamente em $PUBLIC_URL/health"
-          exit 1
+          if [ "$pronto" -ne 1 ]; then
+            echo "A aplicacao subiu na VPS mas nao respondeu publicamente em $PUBLIC_URL/health"
+            exit 1
+          fi
+          echo "Producao respondendo em $PUBLIC_URL/health"
+
+          # /health responder nao prova que o site esta inteiro: o hero do site
+          # novo subiu com 404 e o pipeline deu verde. Aqui conferimos as pecas
+          # que o visitante realmente carrega.
+          for caminho in "/" "/entrar" "/hero-noturno-1600.webp" "/nexolote-mark.svg"; do
+            codigo="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 "$PUBLIC_URL$caminho")"
+            if [ "$codigo" != "200" ]; then
+              echo "FALHA: $PUBLIC_URL$caminho respondeu $codigo (esperado 200)."
+              exit 1
+            fi
+            echo "ok  $caminho -> 200"
+          done
