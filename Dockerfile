@@ -22,7 +22,11 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY api.py auth.py database.py models.py pdf_to_map.py index.html login.html portal.html alembic.ini ./
+# Lista explicita de modulos era uma armadilha: qualquer arquivo .py novo na raiz
+# ficava de fora da imagem e o container so quebrava no boot, em producao, com
+# ModuleNotFoundError. O .dockerignore ja limita quais .html entram (index, login
+# e portal), entao o glob nao traz lixo.
+COPY *.py *.html alembic.ini ./
 COPY app_v1 ./app_v1
 COPY alembic ./alembic
 COPY demo ./demo

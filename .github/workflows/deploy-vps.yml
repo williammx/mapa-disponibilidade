@@ -82,6 +82,16 @@ jobs:
           npm ci
           npm run build
 
+      - name: Build the image and boot the app inside it
+        run: |
+          set -euo pipefail
+          # O CI validava o codigo no runner, onde tudo esta presente, e nunca
+          # construia a imagem. Um modulo fora do COPY do Dockerfile passava por
+          # todos os testes e so quebrava no boot em producao.
+          docker build -t nexolote-ci .
+          docker run --rm -e DATABASE_URL=sqlite:///./ci.db nexolote-ci \
+            python -c "import api, rate_limit, pdf_to_map, app_v1.worker; print('aplicacao importa dentro da imagem')"
+
   deploy:
     name: Deploy production
     needs: validate
