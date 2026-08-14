@@ -1,78 +1,406 @@
+  /* ==========================================================================
+     NexoLote - folha unica do editor de mapas.
+
+     Layout de editor vetorial, em quatro regioes que nunca se sobrepoem:
+
+       #topbar     52px no topo: titulo, contador, acoes da selecao, zoom
+       .rail       coluna de ferramentas na esquerda (dentro de #edit)
+       #side       lista de lotes, ao lado da barra
+       #map        o mapa, com o resto do espaco e nada por cima do centro
+       #inspector  coluna da direita, contextual a selecao
+
+     A soma barra + lista da 312px de proposito: os paineis Transformar (T) e
+     Selecionar (F) sao montados por editor-transform.js / editor-select.js e
+     se ancoram em 328px e 636px. Mudar --rail ou --dock exige rever aquilo.
+
+     Convencoes:
+       * medidas de layout vivem nas variaveis de :root, nunca soltas;
+       * quem some no modo visualizador ja e escondido por pdf_to_map.
+         viewer_guard_html(); o que sobrou (o inspetor) esta no fim do arquivo;
+       * nenhuma regra desliga contorno de foco - a navegacao por Tab e o
+         unico caminho de quem nao usa mouse.
+     ========================================================================== */
+
+  /* -------------------------------------------------------------- fundamentos */
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%;background:#15171a;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#eee;overflow:hidden}
-  #app{position:fixed;inset:0;--lot-opacity:__OPACITY__;--lot-stroke:__STROKE__px}
-  #map{width:100%;height:100%;display:block;touch-action:none;background:#fff;cursor:grab}
-  #map.draw{cursor:crosshair}#map.move-lots{cursor:move}#map.vertex-edit{cursor:default}
-  .lot{stroke:rgba(10,14,18,.68);stroke-width:var(--lot-stroke);vector-effect:non-scaling-stroke;fill-opacity:var(--lot-opacity);cursor:pointer;transition:fill-opacity .1s,stroke-width .1s}
-  .lot:hover{fill-opacity:.86}.lot.sel{stroke:#05070a;stroke-width:calc(var(--lot-stroke) + 1.1px)}
-  .lotlabel{font-size:7px;font-weight:650;text-anchor:middle;dominant-baseline:middle;fill:rgba(13,17,20,.78);vector-effect:non-scaling-stroke;pointer-events:none}
-  .draftpt{fill:#36d889;stroke:#fff;stroke-width:1;vector-effect:non-scaling-stroke}.draftline{fill:none;stroke:#36d889;stroke-width:1.5;stroke-dasharray:4 3;vector-effect:non-scaling-stroke}.vertexpt{fill:#f7faf8;stroke:#087d4b;stroke-width:2;vector-effect:non-scaling-stroke;cursor:move}.selectbox{fill:#36d889;fill-opacity:.12;stroke:#16965d;stroke-width:1;stroke-dasharray:5 3;pointer-events:none}
-  .panel{position:absolute;background:rgba(28,30,34,.94);border:1px solid #383b40;border-radius:12px;padding:8px 11px;backdrop-filter:blur(6px)}
-  #title{top:12px;left:12px;font-weight:700;font-size:14px}#title small{display:block;font-weight:400;color:#a9aab0;font-size:11.5px;margin-top:2px}
-  #legend{bottom:12px;left:12px;font-size:12.5px;line-height:1.9}#legend .row{display:flex;align-items:center;gap:8px}#legend i{width:13px;height:13px;border-radius:3px;display:inline-block}
-  #zoom{top:12px;right:12px;display:flex;flex-direction:column;gap:6px;background:none;border:none;padding:0}
-  #zoom button{width:38px;height:38px;border-radius:10px;border:1px solid #383b40;background:rgba(28,30,34,.92);color:#eee;font-size:19px;cursor:pointer}
-  #edit{top:10px;left:calc(50% + 180px);transform:translateX(-50%);display:flex;align-items:center;gap:6px;justify-content:center;max-width:calc(100vw - 400px);padding:6px;border-radius:8px}
-  #edit button{background:#1f242c;color:#eee;border:1px solid #2c313a;border-radius:6px;padding:7px 9px;font-size:12px;cursor:pointer;white-space:nowrap}
-  #edit button.on{background:#26d07c;color:#06281a;border-color:#26d07c;font-weight:700}#edit .st{width:30px;padding-inline:6px;font-size:15px}#edit .st.on{background:#26313a!important;color:inherit!important;border-color:#eef8f2!important;box-shadow:inset 0 0 0 1px #eef8f2}
-  #edit button:disabled,.editBtns button:disabled{opacity:.38;cursor:not-allowed}.toolset{display:flex;align-items:center;gap:4px}.toolset+.toolset{border-left:1px solid #39434c;padding-left:6px}.selectionSummary{color:#b9c3ca;font-size:11px;min-width:72px;text-align:center;white-space:nowrap}.selectionSummary.active{color:#e9fff4}.kbdIcon{font-size:15px;line-height:0;vertical-align:-1px;margin-right:4px}
-  #info{bottom:12px;right:12px;min-width:140px;display:none}#info .h{font-weight:700;font-size:14px}
-  #lrot{bottom:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;font-size:12.5px;flex-wrap:wrap;justify-content:center;max-width:96vw}#lrot input[type=range]{width:160px;max-width:34vw;accent-color:#1b6cf0}#lrot button{background:#1f242c;color:#eee;border:1px solid #2c313a;border-radius:8px;padding:5px 9px;font-size:12px;cursor:pointer;min-width:30px}#lrot button.on{background:#1b6cf0;color:#fff;border-color:#1b6cf0}#lrot b{min-width:44px;text-align:right;font-variant-numeric:tabular-nums}#lrot .sep{width:1px;height:22px;background:#333;margin:0 1px}#lrot .xy{min-width:86px;color:#a9aab0;text-align:center;font-variant-numeric:tabular-nums}
-  #side{position:absolute;left:0;top:0;bottom:0;width:340px;background:#171a20;border-right:1px solid #363a41;z-index:5;display:flex;flex-direction:column;box-shadow:18px 0 35px rgba(0,0,0,.22);transition:transform .18s ease}
-  #side.closed{transform:translateX(-340px)}#sideToggle{position:absolute;left:352px;top:72px;z-index:6;width:38px;height:38px;border-radius:10px;border:1px solid #383b40;background:rgba(28,30,34,.94);color:#eee;cursor:pointer}#side.closed+#sideToggle{left:12px}
-  .shead{padding:14px;border-bottom:1px solid #33373e}.shead h2{font-size:15px;line-height:1.25;margin-bottom:3px}.shead p{font-size:12px;color:#a9aab0}.sactions{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px}.sactions button,.filter button{background:#232832;color:#e8e8ea;border:1px solid #363c46;border-radius:6px;padding:7px 8px;font-size:11.5px;cursor:pointer}
-  #lotSearch{width:100%;margin-top:12px;background:#101216;border:1px solid #343944;border-radius:9px;color:#f2f2f2;padding:9px 10px;font-size:13px}.filter{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}.filter button.on{border-color:#26d07c;color:#dffbea;background:#143020}
-  .palette{display:grid;gap:8px;padding:12px 14px;border-bottom:1px solid #33373e}.palrow{display:grid;grid-template-columns:18px 1fr 72px;align-items:center;gap:8px;font-size:12px;color:#d9dadd}.palrow input{width:100%;height:28px;background:#101216;border:1px solid #343944;border-radius:7px;padding:2px}
-  .mapstyle{display:grid;gap:9px;padding:12px 14px;border-bottom:1px solid #33373e}.styleRow{display:grid;grid-template-columns:108px 1fr;align-items:center;gap:10px;font-size:12px;color:#d9dadd}.styleRow span{display:flex;align-items:center;justify-content:space-between;gap:8px}.styleRow b{font-variant-numeric:tabular-nums;color:#eef0f3;font-size:11px}.styleRow input[type=range]{width:100%;accent-color:#1b6cf0}.styleRow select{background:#101216;border:1px solid #343944;border-radius:8px;color:#f0f0f2;padding:7px 8px;font-size:12px}
-  #lotList{flex:1;overflow:auto;padding:8px}.lotrow{width:calc(100% - 16px);display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:9px;align-items:center;text-align:left;background:transparent;border:1px solid transparent;border-radius:8px;color:#ececef;padding:7px 8px;cursor:pointer;position:absolute;left:8px;right:8px}.lotrow:hover{background:#22262e}.lotrow.on{background:#27313c;border-color:#52606f}.sw{width:12px;height:12px;border-radius:3px;border:1px solid rgba(255,255,255,.35)}.lt{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lm{display:block;font-size:11px;color:#a9aab0;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tag{font-size:10.5px;color:#b8bbc2;background:#2b3038;border-radius:6px;padding:2px 5px}
-  #editor{border-top:1px solid #33373e;padding:12px 14px;background:#181b20;max-height:44vh;overflow:auto}.empty{font-size:12px;color:#8f929a;line-height:1.45}.selectionHead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.selectionHead strong{font-size:13px}.groupBadge{font-size:10.5px;color:#b9c5cd;background:#29323a;border:1px solid #3d4b56;border-radius:5px;padding:3px 6px}.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.field{display:flex;flex-direction:column;gap:4px;font-size:11px;color:#a9aab0}.field input,.field select{background:#101216;border:1px solid #343944;border-radius:6px;color:#f0f0f2;padding:7px 8px;font-size:12.5px;min-width:0}.field input[type=color]{height:34px;padding:2px}.field.full{grid-column:1/-1}.editBtns{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:9px}.editBtns button{background:#232832;color:#e8e8ea;border:1px solid #363c46;border-radius:6px;padding:7px 8px;font-size:11.5px;cursor:pointer}.editBtns button.primary{background:#26d07c;color:#06281a;border-color:#26d07c;font-weight:700}.editBtns button.danger{color:#ffb4a4}.nudgeRow{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;margin-top:8px}.nudgeRow span{font-size:11px;color:#9faab2}.nudgeGrid{display:grid;grid-template-columns:repeat(4,30px);gap:4px}.nudgeGrid button{height:28px;border-radius:5px;border:1px solid #3b4752;background:#232832;color:#e8e8ea;cursor:pointer}
-  #toast{position:absolute;right:16px;bottom:72px;z-index:10;max-width:320px;background:#111820;color:#eef7f2;border:1px solid #3c4a54;border-left:3px solid #36d889;border-radius:6px;padding:10px 12px;font-size:12px;box-shadow:0 14px 34px rgba(0,0,0,.28);opacity:0;transform:translateY(8px);pointer-events:none;transition:opacity .18s ease,transform .18s ease}#toast.show{opacity:1;transform:none}#toast.error{border-left-color:#e0613b}
-  @media(max-width:760px){#side{width:86vw}#side.closed{transform:translateX(-86vw)}#sideToggle{left:calc(86vw + 12px);top:68px}#edit{left:auto;right:12px;transform:none;max-width:calc(100vw - 74px)}}
+  :root{
+    color-scheme:dark;
+    --topbar:52px;--rail:56px;--dock:256px;--insp:300px;--railbar:58px;
+    --bg:#0b1015;--chrome:#121a21;--sunken:#0a1015;--line:#26313a;--line2:#35454f;
+    --ink:#e7eef1;--dim:#93a3ac;--faint:#7b8a93;
+    --accent:#36d889;--accent-ink:#052419;--accent-soft:#123024;
+    --danger:#f0a48c;--radius:8px;
+  }
+  html,body{height:100%;background:var(--bg);color:var(--ink);overflow:hidden;
+    font-family:"Segoe UI Variable","Segoe UI",Inter,system-ui,-apple-system,Roboto,sans-serif;
+    font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+  #app{position:fixed;inset:0;background:var(--bg);--lot-opacity:__OPACITY__;--lot-stroke:__STROKE__px}
   [hidden]{display:none!important}
-  :root{color-scheme:dark}body{font-family:"Segoe UI Variable","Aptos","Trebuchet MS",system-ui,sans-serif;font-variant-numeric:tabular-nums}
-  button,input,select{transition:border-color .18s ease,background-color .18s ease,box-shadow .18s ease,transform .12s ease}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #36d889;outline-offset:2px}
-  .panel{box-shadow:0 12px 32px rgba(5,9,13,.24);border-color:#3a4651}.panel button:hover{background:#2a333d;border-color:#4c5a66}.panel button:active{transform:translateY(1px)}
-  #side{width:360px;background:#141a20;border-right-color:#303b45;box-shadow:18px 0 38px rgba(0,0,0,.28)}#side.closed{transform:translateX(-360px)}#sideToggle{left:372px;background:#1b232b;border-color:#43505c;box-shadow:0 10px 24px rgba(0,0,0,.24)}#side.closed+#sideToggle{left:12px}
-  .shead{padding:16px;border-bottom-color:#303b45}.shead h2{font-size:16px;letter-spacing:-.01em}.shead p{color:#aab5bd}.sactions button,.filter button,.editBtns button{border-color:#3b4752}.sactions button:hover,.filter button:hover,.editBtns button:hover{background:#2a333d;border-color:#52616d}.filter button.on{background:#143524;border-color:#36d889;color:#dcf9e9}
-  #lotSearch{background:#0f1419;border-color:#3b4752;padding:10px 11px}#lotSearch:focus{box-shadow:0 0 0 3px rgba(54,216,137,.12)}
-  .palette,.mapstyle{padding:14px 16px;border-bottom-color:#303b45}.styleRow{grid-template-columns:112px 1fr}.styleRow input[type=range]{accent-color:#36d889}.styleRow select,.field input,.field select{border-color:#3b4752}.styleRow select:hover,.field input:hover,.field select:hover{border-color:#52616d}
-  #lotList{padding:8px 8px 12px}.lotrow{border-radius:7px}.lotrow:hover{background:#222c35}.lotrow.on{background:#1c3a2c;border-color:#36d889}
-  #title{max-width:min(320px,calc(100vw - 120px));line-height:1.25}#title small{color:#aab5bd}
-  #zoom button{background:#1b232b;border-color:#43505c}#zoom button:hover{background:#29343d;border-color:#60707d}
-  #edit{background:rgba(22,28,34,.97);border-radius:8px;box-shadow:0 14px 38px rgba(4,10,14,.3)}#edit button.on{background:#36d889;border-color:#36d889;color:#06251a}#edit #edt.on{background:#183528;color:#dff8ea;border-color:#36d889;box-shadow:inset 3px 0 0 #36d889}#lrot{left:calc(50% + 180px);background:rgba(22,28,34,.96);border-radius:8px}#lrot input[type=range]{accent-color:#36d889}#app.side-closed #edit,#app.side-closed #lrot{left:50%}
-  .sectionLabel{display:flex;align-items:center;justify-content:space-between;color:#7f8e97;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em}.palette,.mapstyle{position:relative}.palette .sectionLabel,.mapstyle .sectionLabel{margin-bottom:2px}.sideScrim{display:none;position:absolute;inset:0;z-index:4;background:rgba(5,9,12,.46);opacity:0;pointer-events:none;transition:opacity .18s ease}#sideToggle{font-size:0}#sideToggle:before{content:"\2630";font-size:17px}#sideToggle[aria-expanded="true"]:before{content:"\00d7";font-size:22px}.shortcut{display:inline-grid;place-items:center;min-width:18px;height:18px;margin-left:5px;border:1px solid #485560;border-radius:4px;color:#98a6ae;font:10px/1 ui-monospace,SFMono-Regular,Consolas,monospace}.empty{display:flex;align-items:center;min-height:46px}.empty:before{content:"\25a1";margin-right:8px;color:#60707b;font-size:17px}.editBtns button,.nudgeGrid button{min-height:30px}.resultCount{font-weight:700;color:#e8f2ed}
-  /* Workspace cartografico: navegacao, visual e alinhamento ficam separados. */
-  #side{width:320px;box-shadow:14px 0 32px rgba(0,0,0,.24)}#side.closed{transform:translateX(-320px)}#sideToggle{left:332px}.sideHeader{padding:15px 16px 12px;border-bottom:1px solid #303b45}.sideHeader strong{display:block;max-width:255px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.sideHeader span{display:block;margin-top:3px;color:#8f9da5;font-size:10.5px}.sideTabs{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:8px;border-bottom:1px solid #303b45;background:#11171c}.sideTab{height:34px;border:1px solid transparent;border-radius:6px;background:transparent;color:#94a2aa;font-size:11px;cursor:pointer}.sideTab:hover{background:#202a31;color:#e7efec}.sideTab.on{border-color:#40505b;background:#202a31;color:#f0f6f3;box-shadow:inset 0 -2px 0 #36d889}.sidePanel{display:flex;min-height:0;flex:1;flex-direction:column}.sidePanel[hidden]{display:none!important}.sidePanel .shead{padding:12px 12px 10px}.sidePanel #lotSearch{margin-top:0}.sidePanel .filter{margin-top:8px}.sidePanel .sactions{margin-top:8px}.sidePanel .palette,.sidePanel .mapstyle{border-bottom:1px solid #303b45}.visualBody,.alignBody{flex:1;overflow:auto}.statusSummary{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:12px 14px}.statusMetric{padding:9px 7px;border:1px solid #303b45;border-radius:6px;background:#11171c}.statusMetric i{display:block;width:8px;height:8px;margin-bottom:7px;border-radius:2px}.statusMetric b{display:block;font-size:14px}.statusMetric span{display:block;margin-top:2px;color:#89969e;font-size:9.5px}.alignBody{padding:14px}.alignGroup{padding:14px 0;border-bottom:1px solid #303b45}.alignGroup:first-child{padding-top:0}.alignGroup:last-child{border-bottom:0}.alignGroup .sectionLabel{margin-bottom:10px}.alignAngle{display:grid;grid-template-columns:32px 1fr 32px;gap:7px;align-items:center}.alignAngle input{width:100%;accent-color:#36d889}.alignAngle button,.alignNudge button,.alignActions button{height:32px;border:1px solid #3b4752;border-radius:6px;background:#202830;color:#e7eeee;cursor:pointer}.alignValue{display:flex;align-items:center;justify-content:space-between;margin-top:8px;color:#9ba8af;font-size:11px}.alignValue b{color:#edf4f1}.alignNudge{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.alignPosition{margin-top:8px;color:#96a3ab;font-size:11px;text-align:center}.alignActions{display:grid;grid-template-columns:1fr 1fr;gap:7px}.alignActions button.on{border-color:#36d889;background:#173526;color:#ddf8e9}
-  #title,#legend,#info{display:none!important}#lrot{position:static;display:block;max-width:none;padding:0;border:0;border-radius:0;background:none;box-shadow:none;transform:none}#lrot .sep{display:none}
-  #editor{position:absolute;z-index:7;top:66px;right:12px;width:304px;max-height:calc(100vh - 84px);overflow:auto;padding:0;border:1px solid #3a4651;border-radius:8px;background:#171e24;box-shadow:0 20px 50px rgba(4,9,13,.3);opacity:0;pointer-events:none;transform:translateX(12px);transition:opacity .16s ease,transform .16s ease}#editor.show{opacity:1;pointer-events:auto;transform:none}#editor .empty{display:none}.selectionHead{position:sticky;top:0;z-index:1;margin:0;padding:13px 14px 10px;border-bottom:1px solid #303b45;background:#171e24}.selectionHead strong{font-size:14px}.selectionHeadActions{display:flex;align-items:center;gap:6px}.inspectorClose{width:28px;height:28px;border:1px solid #3b4752;border-radius:5px;background:#202830;color:#dfe8e4;cursor:pointer}.groupBadge{white-space:nowrap}.formgrid{padding:13px 14px 4px}.editBtns{padding:7px 14px 0;margin:0}.nudgeRow{padding:10px 14px 14px;margin:0}.inspectorSection{padding:0 14px;color:#809099;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.07em}
-  #edit{left:calc(50% + 160px);max-width:calc(100vw - 368px)}#lrot{left:auto}#app.side-closed #edit{left:50%}.selectionSummary{min-width:58px}.contextGroup{display:none}
-  @media(max-width:1180px){#edit{max-width:calc(100vw - 96px)}#edit .toolLabel{display:none}.kbdIcon{margin-right:0}.selectionSummary{display:none}}
-  @media(max-width:760px){#side{width:min(92vw,340px)}#side.closed{transform:translateX(-100%)}.sideScrim{display:block}#app:not(.side-closed) .sideScrim{opacity:1;pointer-events:auto}#sideToggle{left:calc(min(92vw,340px) - 50px);top:12px;z-index:8}#side.closed+#sideToggle{left:12px}#zoom{top:60px;right:12px}#edit,#app.side-closed #edit{top:10px;right:12px;left:auto;transform:none;max-width:calc(100vw - 78px);overflow-x:auto;justify-content:flex-start;scrollbar-width:none}#edit::-webkit-scrollbar{display:none}#app:not(.side-closed) #zoom,#app:not(.side-closed) #edit{visibility:hidden;pointer-events:none}#editor{top:auto;left:8px;right:8px;bottom:8px;width:auto;max-height:48vh;transform:translateY(12px)}#editor.show{transform:none}.sactions{grid-template-columns:repeat(3,1fr)}}
-  /* Minimal editor polish: Figma-style canvas, compact tools and contextual inspector. */
-  html,body{background:#0b1014;color:#e7edf0}
-  #app{background:#eef1ef}
-  #map{background:#f7f8f6}
-  #side{width:312px;background:#0f151a;border-right:1px solid #26313a;box-shadow:10px 0 28px rgba(4,9,13,.22)}
-  #side.closed{transform:translateX(-312px)}#sideToggle{left:324px;top:18px;width:34px;height:34px;border-radius:8px;background:#111922;border-color:#2b3842;box-shadow:0 12px 30px rgba(3,8,12,.22)}#side.closed+#sideToggle{left:16px}
-  .sideHeader{padding:14px 14px 10px;background:#0f151a}.sideHeader strong{font-size:13px;font-weight:650}.sideHeader span{font-size:10px;color:#91a0a8}
-  .sideTabs{padding:7px;background:#0b1116}.sideTab{height:32px;border-radius:7px;font-weight:600}.sideTab.on{background:#172129;border-color:#33434f;color:#f4faf7;box-shadow:inset 0 -2px 0 #36d889}
-  .shead{padding:12px}.filter{gap:5px}.filter button,.sactions button,.editBtns button,.alignAngle button,.alignNudge button,.alignActions button{border-radius:7px;background:#161f27;border-color:#2c3943;color:#dbe5e7}.filter button.on{background:#113321;border-color:#36d889;color:#dff8ea}
-  #lotSearch{height:38px;margin-top:0;border-radius:8px;background:#0b1116;border-color:#2c3943;color:#eef5f1}
-  #lotList{padding:7px}.lotrow{width:calc(100% - 14px);left:7px;right:7px;border-radius:7px;padding:6px 7px}.lotrow:hover{background:#172129}.lotrow.on{background:#153524;border-color:#36d889}.lt{font-size:12px;font-weight:650}.lm{font-size:10.5px}.tag{border-radius:5px;background:#212b34;color:#aebbc2}
-  .palette,.mapstyle{padding:13px;border-bottom-color:#26313a}.styleRow{grid-template-columns:104px 1fr}.styleRow select,.field input,.field select{height:34px;border-radius:7px;background:#0b1116;border-color:#2c3943}
-  #edit{top:14px;left:calc(50% + 156px);max-width:calc(100vw - 380px);padding:5px;border:1px solid rgba(35,47,57,.72);border-radius:9px;background:rgba(12,18,24,.92);box-shadow:0 18px 50px rgba(3,8,12,.28);backdrop-filter:blur(14px)}
-  #app.side-closed #edit{left:50%;max-width:calc(100vw - 120px)}
-  #edit button{height:32px;border-radius:7px;border-color:transparent;background:transparent;color:#dce6e8;padding:0 9px;font-weight:650}
-  #edit button:hover{background:#1a252e;border-color:#2c3943}#edit button.on{background:#36d889;color:#052419;border-color:#36d889}#edit #edt{border-color:#2c3943;background:#131c23}#edit #edt.on{background:#113321;color:#dff8ea;border-color:#36d889;box-shadow:none}
-  .toolset+.toolset{border-left:1px solid #26313a;padding-left:5px}.kbdIcon{opacity:.86}.selectionSummary{min-width:72px;color:#9facb4}.selectionSummary.active{color:#dff8ea}
-  #eddl{background:#36d889!important;border-color:#36d889!important;color:#052419!important}
-  #zoom{top:16px;right:16px;gap:5px}#zoom button{width:34px;height:34px;border-radius:8px;background:#111922;border-color:#2b3842;box-shadow:0 10px 24px rgba(3,8,12,.18)}
-  #editor{top:64px;right:16px;width:316px;max-height:calc(100vh - 86px);border-radius:9px;background:#101820;border-color:#2b3842;box-shadow:0 22px 60px rgba(3,8,12,.3)}
-  .selectionHead{padding:12px 13px 10px;background:#101820;border-bottom-color:#26313a}.selectionHead strong{font-weight:650}.inspectorClose{border-radius:7px;background:#151f27;border-color:#2c3943}.inspectorSection{padding:0 13px;color:#80909a}.formgrid{padding:12px 13px 4px}.editBtns{grid-template-columns:repeat(2,1fr);padding:7px 13px 0}.nudgeRow{padding:10px 13px 13px}
-  #canvasStatus{position:absolute;left:328px;bottom:14px;z-index:4;max-width:calc(100vw - 660px);padding:7px 10px;border:1px solid rgba(38,49,58,.72);border-radius:8px;background:rgba(12,18,24,.8);color:#b4c0c6;font:11px/1.25 ui-monospace,SFMono-Regular,Consolas,monospace;backdrop-filter:blur(10px);pointer-events:none;box-shadow:0 12px 30px rgba(3,8,12,.18)}
-  #app.side-closed #canvasStatus{left:16px;max-width:calc(100vw - 360px)}
-  @media(max-width:1180px){#edit .toolLabel{display:none}#edit{max-width:calc(100vw - 96px)}#canvasStatus{display:none}}
-  @media(max-width:760px){#side{width:min(92vw,340px)}#side.closed{transform:translateX(-100%)}#sideToggle{left:calc(min(92vw,340px) - 50px);top:12px}#side.closed+#sideToggle{left:12px}#edit,#app.side-closed #edit{top:10px;right:12px;left:auto;max-width:calc(100vw - 78px)}#editor{top:auto;left:8px;right:8px;bottom:8px;width:auto;max-height:48vh}}
-  #draftBar{position:absolute;left:50%;bottom:56px;z-index:9;display:none;align-items:center;gap:10px;max-width:min(560px,calc(100vw - 32px));padding:9px 12px;border:1px solid #2f4a3c;border-radius:9px;background:rgba(11,19,16,.96);color:#dceee4;font-size:12px;line-height:1.35;transform:translateX(-50%);box-shadow:0 16px 40px rgba(3,8,12,.32)}
-  #draftBar.show{display:flex}#draftBar span.draftBarActions{display:flex;gap:6px;flex:0 0 auto}#draftBar button{height:28px;padding:0 10px;border:1px solid #2c3943;border-radius:6px;background:#161f27;color:#dbe5e7;font-size:11.5px;cursor:pointer;white-space:nowrap}#draftBar button:hover{background:#1e2a33;border-color:#3d4c57}#draftBar button.primary{background:#36d889;border-color:#36d889;color:#052419;font-weight:650}
-  @media(max-width:760px){#draftBar{left:8px;right:8px;bottom:8px;max-width:none;transform:none;flex-wrap:wrap}}
+  button,input,select,summary{font:inherit;color:inherit}
+  button{cursor:pointer;background:none;border:0}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button,input,select{transition:background-color .15s ease,border-color .15s ease,color .15s ease,box-shadow .15s ease}
+  button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #36d889;outline-offset:2px}
+  a:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .ic{display:block;width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round;stroke-linejoin:round}
+  .ic.fil{fill:currentColor;stroke:none}
+  .sectionLabel{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    color:var(--faint);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .resultCount{color:var(--dim);letter-spacing:0}
+  .resultCount b{color:var(--ink)}
+
+  /* ------------------------------------------------------------------ tooltip */
+  /* Nome + atalho em todo botao so-de-icone. O nome acessivel continua no
+     aria-label; isto aqui e so a bolha visual, por isso nao entra na a11y. */
+  [data-tip]{position:relative}
+  [data-tip]::after{content:attr(data-tip);position:absolute;z-index:40;left:calc(100% + 9px);top:50%;
+    transform:translateY(-50%);padding:5px 8px;border-radius:6px;border:1px solid var(--line2);
+    background:#05090c;color:#eaf3f5;font-size:11px;font-weight:500;line-height:1;letter-spacing:.01em;
+    white-space:nowrap;box-shadow:0 10px 26px rgba(0,0,0,.45);opacity:0;pointer-events:none;
+    transition:opacity .12s ease .3s}
+  [data-tip]:hover::after,[data-tip]:focus-visible::after{opacity:1}
+  [data-tip-pos="bottom"]::after{left:50%;top:calc(100% + 9px);transform:translateX(-50%)}
+
+  /* ------------------------------------------------------------------- topbar */
+  #topbar{position:absolute;z-index:6;top:0;left:0;right:0;height:var(--topbar);
+    display:flex;align-items:center;gap:10px;padding:0 12px;
+    background:var(--chrome);border-bottom:1px solid var(--line)}
+  #topbar>*{flex:none}
+  #topbar>.topbarGap{flex:1 1 auto;min-width:8px}
+  #sideToggle{display:grid;place-items:center;width:34px;height:34px;border-radius:var(--radius);
+    border:1px solid var(--line);background:var(--sunken);color:var(--ink)}
+  #sideToggle:hover{border-color:var(--line2);background:#182129}
+  #sideToggle[aria-expanded="true"]{color:var(--accent);border-color:#2b4b3c}
+  #title{max-width:214px;font-size:13px;font-weight:650;line-height:1.15;letter-spacing:-.01em;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #title small{display:block;margin-top:2px;color:var(--dim);font-size:10.5px;font-weight:400}
+  #zoom{display:flex;align-items:center;gap:4px;padding:3px;border:1px solid var(--line);
+    border-radius:9px;background:var(--sunken)}
+  #zoom button{display:grid;place-items:center;width:30px;height:28px;border-radius:6px;color:var(--dim)}
+  #zoom button:hover{background:#1b242c;color:var(--ink)}
+
+  /* #edit e o dono unico das ferramentas e das acoes; o modo visualizador
+     esconde ele inteiro. display:contents deixa a mesma arvore aparecer nos
+     dois lugares: a coluna .rail e o grupo .barActions aqui no topo. */
+  #edit,#edtools{display:contents}
+  .barActions{display:flex;align-items:center;gap:4px;min-width:0}
+  .actGroup{display:flex;align-items:center;gap:2px;padding-right:6px;margin-right:2px;
+    border-right:1px solid var(--line)}
+  .barActions button{display:flex;align-items:center;justify-content:center;gap:6px;
+    height:32px;min-width:32px;padding:0 6px;border:1px solid transparent;border-radius:7px;color:var(--dim)}
+  .barActions button:hover:not(:disabled){background:#1b242c;border-color:var(--line);color:var(--ink)}
+  .barActions button:disabled{color:var(--faint)}
+  .barActions button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+  .statusGroup button{width:30px;padding:0}
+  .statusGroup button.on{background:#1d2831;border-color:var(--line2);box-shadow:inset 0 0 0 1px var(--line2)}
+  .selectionSummary{padding:0 8px;color:var(--faint);font-size:11px;white-space:nowrap}
+  .selectionSummary.active{color:var(--accent)}
+  #eddl{padding:0 11px;border-color:var(--accent)!important;background:var(--accent);color:var(--accent-ink)!important;
+    font-size:12px;font-weight:650}
+  #eddl:hover:not(:disabled){background:#43e696;color:var(--accent-ink)}
+  .btnLabel{font-size:12px}
+
+  /* -------------------------------------------------- barra vertical + #edt */
+  /* Ficam dentro de #topbar no DOM (por causa de #edit), entao as coordenadas
+     partem da caixa dele: top:0 = topo da janela, left:0 = borda esquerda. */
+  #edt{position:absolute;left:6px;top:calc(var(--topbar) + 8px);display:grid;place-items:center;
+    width:44px;height:36px;border:1px solid var(--line);border-radius:9px;background:var(--chrome);
+    color:var(--dim);box-shadow:0 10px 26px rgba(3,8,12,.35)}
+  #edt:hover{border-color:var(--line2);color:var(--ink)}
+  #edt.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+  .rail{position:absolute;left:6px;top:calc(var(--topbar) + 52px);width:44px;
+    max-height:calc(100vh - var(--topbar) - 64px);display:flex;flex-direction:column;gap:4px;padding:5px;
+    border:1px solid var(--line);border-radius:11px;background:var(--chrome);
+    box-shadow:0 16px 40px rgba(3,8,12,.4)}
+  .railGroup{display:flex;flex-direction:column;gap:2px}
+  .railGroup+.railGroup{padding-top:5px;margin-top:1px;border-top:1px solid var(--line)}
+  .rail button{display:grid;place-items:center;width:34px;height:32px;border:1px solid transparent;
+    border-radius:7px;color:var(--dim)}
+  .rail button:hover:not(:disabled){background:#1b242c;border-color:var(--line);color:var(--ink)}
+  .rail button.on,.rail button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);
+    color:var(--accent-ink)}
+  /* Laco, regua e repetir sao ferramentas de editor-select.js / -transform.js:
+     quem recebe a marca de ativa e o botao que eles montam no proprio painel.
+     Estas tres regras espelham o estado aqui na barra. */
+  #app:has(#edlasso[aria-pressed="true"]) #tbLasso,
+  #app:has(#edruler[aria-pressed="true"]) #tbRuler,
+  #app:has(#edarray[aria-pressed="true"]) #tbArray{background:var(--accent);border-color:var(--accent);
+    color:var(--accent-ink)}
+
+  /* --------------------------------------------------------- lista de lotes */
+  #side{position:absolute;z-index:5;left:var(--rail);top:var(--topbar);bottom:0;width:var(--dock);
+    display:flex;flex-direction:column;background:var(--chrome);border-right:1px solid var(--line);
+    transition:transform .18s ease}
+  #side.closed{transform:translateX(calc(-1 * (var(--rail) + var(--dock))))}
+  .sidePanel{display:flex;flex:1;min-height:0;flex-direction:column}
+  .shead{display:grid;gap:8px;padding:12px;border-bottom:1px solid var(--line)}
+  #lotSearch{width:100%;height:34px;padding:0 10px;border:1px solid var(--line);border-radius:var(--radius);
+    background:var(--sunken);color:var(--ink);font-size:12.5px}
+  #lotSearch::placeholder{color:var(--faint)}
+  #lotSearch:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(54,216,137,.14)}
+  .filter{display:flex;flex-wrap:wrap;gap:4px}
+  .sactions{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+  .filter button,.sactions button{height:28px;padding:0 8px;border:1px solid var(--line);border-radius:6px;
+    background:var(--sunken);color:var(--dim);font-size:11px}
+  .filter button:hover,.sactions button:hover{border-color:var(--line2);color:var(--ink)}
+  .filter button.on{background:var(--accent-soft);border-color:var(--accent);color:#d9f7e8}
+  #lotList{flex:1;min-height:0;overflow:auto;padding:6px}
+  /* Lista virtualizada: editor.js posiciona cada linha com top/height em pixel. */
+  .lotrow{position:absolute;left:6px;right:6px;width:calc(100% - 12px);display:grid;
+    grid-template-columns:12px minmax(0,1fr) auto;align-items:center;gap:9px;padding:6px 8px;
+    border:1px solid transparent;border-radius:7px;background:transparent;color:var(--ink);text-align:left}
+  .lotrow:hover{background:#1a232b}
+  .lotrow.on{background:var(--accent-soft);border-color:var(--accent)}
+  .sw{width:12px;height:12px;border-radius:3px;border:1px solid rgba(255,255,255,.3)}
+  .lt{display:block;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lm{display:block;margin-top:1px;color:var(--dim);font-size:10.5px;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .tag{padding:2px 5px;border-radius:5px;background:#1e2831;color:var(--dim);font-size:10px}
+  .sideScrim{display:none;position:absolute;inset:0;z-index:4;background:rgba(4,8,11,.5);opacity:0;
+    pointer-events:none;transition:opacity .18s ease}
+
+  /* ------------------------------------------------------------------- mapa */
+  /* O <svg> tem proporcao propria (viewBox): com left/right/top/bottom o
+     navegador resolveria a altura pela proporcao e sobraria faixa vazia. Por
+     isso quem recebe as medidas e #canvas, e o mapa preenche 100% dele. */
+  #canvas{position:absolute;top:var(--topbar);left:calc(var(--rail) + var(--dock));right:var(--insp);bottom:0}
+  #app.side-closed #canvas{left:var(--rail)}
+  #map{display:block;width:100%;height:100%;background:#eef1ee;touch-action:none;cursor:grab}
+  #map.draw{cursor:crosshair}#map.move-lots{cursor:move}#map.vertex-edit{cursor:default}
+  .lot{stroke:rgba(10,14,18,.68);stroke-width:var(--lot-stroke);vector-effect:non-scaling-stroke;
+    fill-opacity:var(--lot-opacity);cursor:pointer;transition:fill-opacity .1s,stroke-width .1s}
+  .lot:hover{fill-opacity:.88}
+  .lot.sel{stroke:#05070a;stroke-width:calc(var(--lot-stroke) + 1.1px)}
+  .lotlabel{font-size:7px;font-weight:650;text-anchor:middle;dominant-baseline:middle;
+    fill:rgba(13,17,20,.78);vector-effect:non-scaling-stroke;pointer-events:none}
+  .draftpt{fill:#36d889;stroke:#fff;stroke-width:1;vector-effect:non-scaling-stroke}
+  .draftline{fill:none;stroke:#36d889;stroke-width:1.5;stroke-dasharray:4 3;vector-effect:non-scaling-stroke}
+  .vertexpt{fill:#f7faf8;stroke:#087d4b;stroke-width:2;vector-effect:non-scaling-stroke;cursor:move}
+  .selectbox{fill:#36d889;fill-opacity:.12;stroke:#16965d;stroke-width:1;stroke-dasharray:5 3;pointer-events:none}
+  #canvasStatus{position:absolute;z-index:4;left:12px;bottom:12px;max-width:calc(100% - 24px);
+    padding:6px 10px;border:1px solid var(--line);border-radius:7px;background:rgba(10,16,21,.86);
+    color:var(--dim);font:11px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace;pointer-events:none;
+    backdrop-filter:blur(8px)}
+
+  /* -------------------------------------------------------------- inspetor */
+  #inspector{position:absolute;z-index:5;top:var(--topbar);right:0;bottom:0;width:var(--insp);
+    overflow:auto;background:var(--chrome);border-left:1px solid var(--line)}
+  .inspHead{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 13px 10px;
+    border-bottom:1px solid var(--line)}
+  .inspHead strong{font-size:13px;font-weight:650}
+  .inspHint{padding:10px 13px 14px;color:var(--faint);font-size:11px;line-height:1.45}
+  .inspectorSection{padding:12px 13px 6px;color:var(--faint);font-size:9.5px;font-weight:700;
+    letter-spacing:.08em;text-transform:uppercase}
+  /* Secoes que o operador abre e fecha; o estado vale enquanto a aba estiver aberta. */
+  details.insp{border-bottom:1px solid var(--line)}
+  details.insp>summary{display:flex;align-items:center;gap:7px;padding:10px 13px;color:var(--dim);
+    font-size:11px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;cursor:pointer;
+    list-style:none}
+  details.insp>summary::-webkit-details-marker{display:none}
+  details.insp>summary::before{content:"";width:6px;height:6px;border-right:1.6px solid currentColor;
+    border-bottom:1.6px solid currentColor;transform:rotate(-45deg);transition:transform .15s ease}
+  details.insp[open]>summary::before{transform:rotate(45deg)}
+  details.insp>summary:hover{color:var(--ink)}
+  .statusSummary{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:12px 13px}
+  .statusMetric{padding:8px 7px;border:1px solid var(--line);border-radius:7px;background:var(--sunken)}
+  .statusMetric i{display:block;width:8px;height:8px;margin-bottom:6px;border-radius:2px}
+  .statusMetric b{display:block;font-size:14px}
+  .statusMetric span{display:block;margin-top:1px;color:var(--faint);font-size:9.5px}
+  .palette{display:grid;gap:7px;padding:2px 13px 12px}
+  .palrow{display:grid;grid-template-columns:14px 1fr 62px;align-items:center;gap:8px;
+    color:var(--dim);font-size:11.5px}
+  .palrow input{width:100%;height:26px;padding:2px;border:1px solid var(--line);border-radius:6px;
+    background:var(--sunken)}
+  .mapstyle{display:grid;gap:9px;padding:0 13px 13px}
+  .styleRow{display:grid;grid-template-columns:98px 1fr;align-items:center;gap:9px;color:var(--dim);font-size:11.5px}
+  .styleRow span{display:flex;align-items:center;justify-content:space-between;gap:6px}
+  .styleRow b{color:var(--ink);font-size:10.5px}
+  .styleRow input[type=range]{width:100%;accent-color:var(--accent)}
+  .alignBody{padding:0 13px 12px}
+  .alignGroup{padding:11px 0;border-bottom:1px solid var(--line)}
+  .alignGroup:last-child{border-bottom:0;padding-bottom:0}
+  .alignGroup .sectionLabel{margin-bottom:8px}
+  .alignAngle{display:grid;grid-template-columns:30px 1fr 30px;align-items:center;gap:6px}
+  .alignAngle input{width:100%;accent-color:var(--accent)}
+  .alignNudge{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}
+  .alignActions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .alignAngle button,.alignNudge button,.alignActions button,.bulkRow button{height:30px;
+    border:1px solid var(--line);border-radius:6px;background:var(--sunken);color:var(--dim);font-size:11.5px}
+  .alignAngle button:hover,.alignNudge button:hover,.alignActions button:hover,.bulkRow button:hover{
+    border-color:var(--line2);color:var(--ink)}
+  .alignActions button.on{background:var(--accent-soft);border-color:var(--accent);color:#d9f7e8}
+  .alignValue{display:flex;align-items:center;justify-content:space-between;margin-top:7px;
+    color:var(--dim);font-size:11px}
+  .alignValue b{color:var(--ink)}
+  .alignPosition{margin-top:7px;color:var(--dim);font-size:11px;text-align:center}
+  .bulkRow{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:0 13px}
+  .bulkRow button{display:grid;place-items:center}
+
+  /* Estados do inspetor. `#edmove` so fica ligado com algum lote selecionado e
+     `#edgroup` so com dois ou mais - editor.js cuida disso em counts(). Sem
+     :has() no navegador, o cartao do mapa fica sempre visivel (nada quebra). */
+  #inspMap{display:block}
+  #app:has(#edmove:not(:disabled)) #inspMap{display:none}
+  #inspBulk{display:none;padding-bottom:12px}
+  #app:has(#edgroup:not(:disabled)) #inspBulk{display:block}
+  #editor{display:none}
+  #editor.show{display:block}
+  #editor .empty{display:none}
+  .selectionHead{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    padding:12px 13px 10px;border-bottom:1px solid var(--line)}
+  .selectionHead strong{font-size:13px;font-weight:650}
+  .selectionHeadActions{display:flex;align-items:center;gap:6px}
+  .groupBadge{padding:3px 6px;border:1px solid var(--line);border-radius:5px;background:var(--sunken);
+    color:var(--dim);font-size:10px;white-space:nowrap}
+  .inspectorClose{width:26px;height:26px;border:1px solid var(--line);border-radius:6px;
+    background:var(--sunken);color:var(--dim)}
+  .inspectorClose:hover{border-color:var(--line2);color:var(--ink)}
+  .formgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px 13px 4px}
+  .field{display:flex;flex-direction:column;gap:4px;min-width:0;color:var(--faint);font-size:10.5px}
+  .field.full{grid-column:1/-1}
+  .field input,.field select{height:32px;min-width:0;padding:0 8px;border:1px solid var(--line);
+    border-radius:6px;background:var(--sunken);color:var(--ink);font-size:12px}
+  .field input[type=color]{padding:2px}
+  .field input:hover,.field select:hover{border-color:var(--line2)}
+  /* Com varios lotes o editor.js desabilita nome, quadra e area: precisa ler
+     como campo travado, senao parece que a digitacao sumiu. */
+  .field input:disabled,.field select:disabled{opacity:.5;cursor:not-allowed}
+  .editBtns{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;padding:9px 13px 0}
+  .editBtns button{height:30px;border:1px solid var(--line);border-radius:6px;background:var(--sunken);
+    color:var(--dim);font-size:11.5px}
+  .editBtns button:hover:not(:disabled){border-color:var(--line2);color:var(--ink)}
+  .editBtns button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:650}
+  .editBtns button.danger{color:var(--danger)}
+  .nudgeRow{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;padding:10px 13px 13px}
+  .nudgeRow span{color:var(--dim);font-size:11px}
+  .nudgeGrid{display:grid;grid-template-columns:repeat(4,28px);gap:4px}
+  .nudgeGrid button{height:28px;border:1px solid var(--line);border-radius:6px;background:var(--sunken);
+    color:var(--dim)}
+  .nudgeGrid button:hover{border-color:var(--line2);color:var(--ink)}
+
+  /* --------------------------------------------- rascunho, aviso e legado */
+  #draftBar{position:absolute;z-index:8;top:12px;left:14px;right:14px;
+    display:none;align-items:center;gap:10px;padding:9px 12px;border:1px solid #2f4a3c;border-radius:9px;
+    background:rgba(11,25,20,.97);color:#d9efe4;font-size:12px;line-height:1.35;
+    box-shadow:0 18px 44px rgba(3,8,12,.42)}
+  #draftBar.show{display:flex}
+  #draftBarText{flex:1;min-width:0}
+  .draftBarActions{display:flex;flex:none;gap:6px}
+  #draftBar button{height:28px;padding:0 10px;border:1px solid var(--line2);border-radius:6px;
+    background:#17232b;color:var(--ink);font-size:11.5px;white-space:nowrap}
+  #draftBar button:hover{background:#1f2d36}
+  #draftBar button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:650}
+  #toast{position:absolute;z-index:20;right:16px;bottom:16px;max-width:300px;
+    padding:10px 12px;border:1px solid var(--line2);border-left:3px solid var(--accent);border-radius:7px;
+    background:#0c141a;color:#e9f4ef;font-size:12px;box-shadow:0 16px 40px rgba(0,0,0,.4);
+    opacity:0;transform:translateY(8px);pointer-events:none;transition:opacity .18s ease,transform .18s ease}
+  #toast.show{opacity:1;transform:none}
+  #toast.error{border-left-color:#e0613b}
+  /* Cartoes flutuantes que os paineis montados por JS herdam (.panel). */
+  .panel{border-radius:9px;box-shadow:0 22px 60px rgba(2,6,10,.45)}
+  /* #legend nunca teve conteudo e #info foi substituido pelo inspetor da
+     direita - os dois ficam no DOM porque editor.js ainda escreve em #ih/#is. */
+  #legend,#info{display:none!important}
+
+  /* ================================================================ 1180px */
+  /* Notebook pequeno: o inspetor vira gaveta por cima do mapa e o mapa cresce. */
+  @media(max-width:1180px){
+    #inspector{box-shadow:-18px 0 44px rgba(2,6,10,.45)}
+    #canvas,#app.side-closed #canvas{right:0}
+    #toast{right:calc(var(--insp) + 16px)}
+    .btnLabel,.selectionSummary{display:none}
+    #eddl{padding:0 6px}
+  }
+
+  /* ================================================================= 760px */
+  /* Tablet e celular: a barra deita no rodape, a lista e o inspetor viram
+     gavetas. Os paineis T e F ja se mudam sozinhos para o rodape - por isso a
+     margem no fim, que os levanta acima da barra de ferramentas. */
+  @media(max-width:760px){
+    #topbar{gap:8px;padding:0 8px}
+    /* Sem o vao elastico o titulo fica com toda a folga que sobra da tira. */
+    #topbar>.topbarGap{display:none}
+    #title{max-width:none;flex:1;min-width:0}
+    #edt{position:static;order:1;width:38px;height:34px;box-shadow:none}
+    #zoom{order:2}
+    /* Uma tira so no rodape, rolavel na horizontal: ferramentas e acoes sao
+       irmas dentro de #edtools, entao basta ele deixar de ser display:contents.
+       position:fixed porque a ancora agora e a janela, nao a caixa do #topbar. */
+    #edtools{display:flex;position:fixed;z-index:10;left:8px;right:8px;bottom:8px;align-items:center;
+      gap:6px;padding:5px;border:1px solid var(--line);border-radius:11px;background:var(--chrome);
+      box-shadow:0 14px 34px rgba(3,8,12,.45);overflow-x:auto;scrollbar-width:none}
+    #edtools::-webkit-scrollbar{display:none}
+    .rail,.barActions{position:static;flex:none;width:auto;max-height:none;padding:0;border:0;
+      border-radius:0;background:none;box-shadow:none;flex-direction:row;gap:4px}
+    .railGroup{flex-direction:row;gap:2px}
+    .railGroup+.railGroup{padding:0 0 0 5px;margin:0;border-top:0;border-left:1px solid var(--line)}
+    .rail button,.barActions button{flex:none;width:36px;height:36px}
+    #eddl{width:auto;padding:0 10px}
+    [data-tip]::after{display:none}
+    #side{left:0;top:var(--topbar);width:min(88vw,320px);z-index:9;
+      box-shadow:14px 0 40px rgba(2,6,10,.5)}
+    #side.closed{transform:translateX(-100%)}
+    .sideScrim{display:block}
+    #app:not(.side-closed) .sideScrim{opacity:1;pointer-events:auto;z-index:8}
+    #canvas,#app.side-closed #canvas{left:0;right:0;bottom:var(--railbar)}
+    /* Fora do modo de edicao a tira do rodape nao existe: o mapa toma o lugar. */
+    #app:has(#edtools[hidden]) #canvas,#app:has(#edtools[hidden]) #inspector{bottom:0}
+    #inspector{left:0;right:0;top:auto;bottom:var(--railbar);width:auto;max-height:52vh;
+      border-left:0;border-top:1px solid var(--line);box-shadow:0 -18px 44px rgba(2,6,10,.5)}
+    /* No celular o inspetor so aparece com lote selecionado: as propriedades do
+       mapa nao valem meia tela parada. Sem :has() ele fica sempre visivel. */
+    #app:has(#edmove:disabled) #inspector{display:none}
+    #canvasStatus{left:8px;bottom:8px;max-width:calc(100% - 16px)}
+    #draftBar{left:8px;right:8px;top:auto;bottom:8px;flex-wrap:wrap}
+    #toast{right:8px;left:8px;max-width:none;bottom:8px}
+  }
+
+  /* ================================================= paineis montados por JS */
+  /* Transformar (T) e Selecionar (F) nascem em editor-transform.js e
+     editor-select.js como <section role="group"> filhas de #app, ancoradas em
+     328px e 636px - exatamente ao lado da lista. Quando a lista recolhe elas
+     pulam para 16px, que agora e a barra de ferramentas: esta regra devolve o
+     lugar delas. A de 1320px so existe porque nessa faixa o painel de selecao
+     ancora pela direita, e ai deslocar seria empurrar para o lado errado. */
+  @media(min-width:1181px){
+    #app.side-closed>section[role="group"]{margin-left:var(--rail)}
+  }
+  /* De 1181 a 1320 o painel de selecao ancora pela direita, bem onde mora o
+     inspetor: em vez de deslocar pela esquerda, ele recua o proprio inspetor. */
+  @media(min-width:1181px) and (max-width:1320px){
+    #app>section[aria-label^="Selecionar"]{margin-left:0;margin-right:var(--insp)}
+  }
+  /* Entre 761 e 1180 os dois se ancoram na borda: o de transformar na direita
+     (sobre o inspetor) e o de selecao na esquerda (sobre a barra e a lista). */
+  @media(min-width:761px) and (max-width:1180px){
+    #app>section[role="group"]{margin-right:var(--insp)}
+    #app.side-closed>section[role="group"]{margin-left:var(--rail)}
+    #app>section[aria-label^="Selecionar"],
+    #app.side-closed>section[aria-label^="Selecionar"]{margin-left:calc(var(--rail) + var(--dock));
+      margin-right:0}
+  }
+  /* No celular elas viram folha de rodape, onde agora fica a barra deitada: a
+     margem levanta a folha acima da barra e o teto de altura deixa o inspetor
+     e o mapa respirarem. Com a de transformar aberta (o modo de edicao abre
+     sozinho) o inspetor sobe em vez de ficar por baixo. */
+  @media(max-width:760px){
+    #app>section[role="group"]{margin-bottom:var(--railbar);max-height:34vh}
+    #app:has(>section[aria-label^="Transformar"]:not([hidden])) #inspector{
+      bottom:calc(var(--railbar) + 34vh + 10px);max-height:36vh}
+  }
+
+  /* ==================================================== modo visualizador */
+  /* pdf_to_map.viewer_guard_html() esconde #side, #edit, #editor e companhia,
+     e marca #app com .shared-viewer. O inspetor e novo, entao some aqui. A
+     segunda regra pega o instante antes do DOMContentLoaded (a folha do guard
+     ja chegou no head) - fica separada de proposito: em navegador sem
+     :has() um seletor invalido derrubaria a regra inteira. */
+  #app.shared-viewer #inspector{display:none}
+  #app.shared-viewer #canvas,#app.shared-viewer.side-closed #canvas{left:0;right:0}
+  html:has(#shared-viewer) #inspector{display:none}
+  html:has(#shared-viewer) #canvas{left:0;right:0}
+  /* O app hospedeiro (api.py) prega uma barra fixa no canto superior direito
+     ("Voltar ao projeto" + "Salvar alteracoes", ~300px a 64px da borda): cede o
+     espaco dela para nao cobrir o zoom. */
+  html:has(#project-save-bar) #topbar{padding-right:376px}

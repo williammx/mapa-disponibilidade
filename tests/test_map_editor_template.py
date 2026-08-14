@@ -290,3 +290,18 @@ def test_dockerignore_nao_engole_o_html_do_editor():
     """A regra `*.html` do .dockerignore excluiria templates/editor/editor.html."""
     conteudo = open(_os.path.join(_RAIZ, ".dockerignore"), encoding="utf-8").read()
     assert "!templates/**" in conteudo
+
+
+def test_todos_os_arquivos_do_editor_estao_versionados():
+    """A regra `*.html` do .gitignore ja deixou editor.html fora do repositorio.
+
+    Como pdf_to_map le esses arquivos no import, um deles faltando na imagem
+    derruba o container no boot — e o diff local nao acusa nada.
+    """
+    import subprocess
+
+    saida = subprocess.run(["git", "ls-files", "templates/editor"],
+                           cwd=_RAIZ, capture_output=True, text=True, timeout=60)
+    versionados = {_os.path.basename(linha) for linha in saida.stdout.split() if linha}
+    for nome in ("editor.css", "editor.html", "editor.js"):
+        assert nome in versionados, "%s nao esta versionado no git" % nome

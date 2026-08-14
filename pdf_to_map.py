@@ -1830,12 +1830,24 @@ def _read_editor_part(nome):
         return arquivo.read().rstrip("\n")
 
 
+def _editor_scripts():
+    """editor.js e os modulos editor-*.js, na ordem em que devem ser lidos.
+
+    Cada bloco novo do editor (geometria, transformacao, selecao) vive no seu
+    proprio arquivo. Todos entram no mesmo <script>, em ordem alfabetica depois
+    do nucleo: o HTML gerado precisa continuar sendo um arquivo unico e sem CDN.
+    """
+    extras = sorted(nome for nome in os.listdir(EDITOR_DIR)
+                    if nome.startswith("editor-") and nome.endswith(".js"))
+    return "\n".join(_read_editor_part(nome) for nome in ["editor.js"] + extras)
+
+
 def _build_html_template():
     return (
         '<!doctype html><html lang="pt-br"><head>\n<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=4,user-scalable=yes">\n<title>__TITLE__</title><link rel="icon" href="data:,">\n'
         "<style>\n" + _read_editor_part("editor.css") + "\n</style></head><body>\n"
         + _read_editor_part("editor.html")
-        + "\n<script>\n" + _read_editor_part("editor.js")
+        + "\n<script>\n" + _editor_scripts()
         + "\n</script></body></html>"
     )
 

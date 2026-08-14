@@ -30,6 +30,10 @@ data/
 !frontend/public/*.jpeg
 !frontend/public/*.webp
 !demo/*.html
+# O esqueleto do editor vive em templates/editor/editor.html. Sem esta
+# excecao a regra *.html acima o deixa fora do repositorio, e a imagem sobe
+# sem ele: pdf_to_map le o arquivo no import e o container morre no boot.
+!templates/**
 
 # Frontend dependencies/build cache
 frontend/node_modules/
