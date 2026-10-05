@@ -23,6 +23,7 @@ from auth import COOKIE_NAME, audit, clear_session, current_user, hash_token, no
 from database import Base, engine, get_db
 from models import AuditEvent, EditProposal, Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
 from app_v1.api import router as api_v1_router
+from app_v1.integrations import router as integrations_router, management_router as integration_keys_router
 from app_v1.schemas import SharedEditProposalCreate
 
 # Em producao a documentacao interativa expunha o mapa completo de rotas, schemas
@@ -35,6 +36,8 @@ app = FastAPI(
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 app.include_router(api_v1_router)
+app.include_router(integrations_router)
+app.include_router(integration_keys_router)
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 CONVERTER_JOB_DIR = os.getenv("CONVERTER_JOB_DIR", os.path.join(HERE, "data", "converter_jobs"))

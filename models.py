@@ -182,6 +182,36 @@ class Session(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
+class IntegrationApiKey(Base):
+    __tablename__ = "integration_api_keys"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_by_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rate_window_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rate_request_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class IntegrationUploadRequest(Base):
+    __tablename__ = "integration_upload_requests"
+    __table_args__ = (UniqueConstraint("api_key_id", "project_id", "idempotency_key_hash", name="uq_integration_upload_request"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    api_key_id: Mapped[str] = mapped_column(ForeignKey("integration_api_keys.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    idempotency_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("processing_jobs.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

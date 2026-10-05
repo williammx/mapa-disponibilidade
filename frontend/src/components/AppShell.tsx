@@ -1,4 +1,4 @@
-import { Buildings, ClockCounterClockwise, GearSix, ShieldCheck, SquaresFour, UserCircle } from "@phosphor-icons/react";
+import { Buildings, PlugsConnected, ClockCounterClockwise, GearSix, ShieldCheck, SquaresFour, UserCircle } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useOutletContext } from "react-router-dom";
@@ -21,7 +21,7 @@ export function isInternalRole(role: string): boolean {
 export type SessionUser = { name: string; platformRole: string };
 export type SessionContext = { user: SessionUser };
 
-type NavItem = { to: string; label: string; icon: typeof SquaresFour; end?: boolean; adminOnly?: boolean };
+type NavItem = { to: string; label: string; icon: typeof SquaresFour; end?: boolean; adminOnly?: boolean; platformAdminOnly?: boolean };
 
 const nav: NavItem[] = [
   { to: "/app", label: "Projetos", icon: SquaresFour, end: true },
@@ -29,6 +29,7 @@ const nav: NavItem[] = [
   { to: "/app/atividade", label: "Atividade", icon: ClockCounterClockwise },
   { to: "/app/perfil", label: "Perfil", icon: UserCircle },
   { to: "/app/preferencias", label: "Preferencias", icon: GearSix },
+  { to: "/app/integracoes", label: "Integracoes", icon: PlugsConnected, platformAdminOnly: true },
   { to: "/app/admin", label: "Admin", icon: ShieldCheck, adminOnly: true },
 ];
 
@@ -75,7 +76,7 @@ export function AppShell() {
     );
   }
 
-  const visibleNav = nav.filter((item) => !item.adminOnly || isInternalRole(user.platformRole));
+  const visibleNav = nav.filter((item) => (!item.adminOnly || isInternalRole(user.platformRole)) && (!item.platformAdminOnly || user.platformRole === PLATFORM_ADMIN_ROLE));
 
   return (
     <div className="min-h-[100dvh] bg-[#081014] text-slate-100">
@@ -146,10 +147,10 @@ export function useSession() {
   return useOutletContext<SessionContext>();
 }
 
-export function RequirePlatformAdmin({ children }: { children: ReactNode }) {
+export function RequirePlatformAdmin({ children, strict = false }: { children: ReactNode; strict?: boolean }) {
   const { user } = useSession();
 
-  if (!isInternalRole(user.platformRole)) {
+  if (strict ? user.platformRole !== PLATFORM_ADMIN_ROLE : !isInternalRole(user.platformRole)) {
     return (
       <div className="space-y-8">
         <SectionHeader

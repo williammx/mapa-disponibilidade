@@ -12,6 +12,7 @@ import { ProjectWorkspacePage } from "./pages/ProjectWorkspacePage";
 import { PublicMapPage } from "./pages/PublicMapPage";
 import { ClientPortalPage } from "./pages/ClientPortalPage";
 import { AdminPage } from "./pages/AdminPage";
+import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { isLocalDemoMode } from "./api";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
@@ -39,6 +40,7 @@ export function App() {
               </RequirePlatformAdmin>
             }
           />
+          <Route path="integracoes" element={<RequirePlatformAdmin strict><IntegrationsPage /></RequirePlatformAdmin>} />
           <Route path="projetos/:projectId" element={<ProjectWorkspacePage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

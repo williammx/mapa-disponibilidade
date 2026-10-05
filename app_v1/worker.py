@@ -243,9 +243,15 @@ def run_processing_job(job_id: str) -> None:
         # Se o worker anterior morreu de OOM, o proximo job e quem descobre:
         # varre antes de comecar e liberta as linhas presas em "running".
         recover_stalled_jobs_quietly(db, skip_job_id=job_id)
-        job = db.get(ProcessingJob, job_id)
-        if not job:
+        # Claim once, atomically against integration queued-only cancellation.
+        # Duplicate RQ deliveries must not restart completed/cancelled jobs.
+        claimed = db.query(ProcessingJob).filter(
+            ProcessingJob.id == job_id, ProcessingJob.status == "queued",
+        ).update({"status": "running", "started_at": utcnow()}, synchronize_session=False)
+        db.commit()
+        if not claimed:
             return
+        job = db.get(ProcessingJob, job_id)
         project = db.get(Project, job.project_id)
         source_asset = db.get(FileAsset, job.source_file_asset_id) if job.source_file_asset_id else None
         if not project or not source_asset:

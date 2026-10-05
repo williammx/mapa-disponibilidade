@@ -432,6 +432,11 @@ def download_file(file_id: str, user: User = Depends(current_user), db: DbSessio
 @router.post("/projects/{project_id}/processing-jobs", status_code=202)
 def create_processing_job(project_id: str, source_file_id: str | None = None, quality: str = Query("balanced"),
                           user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    return start_processing_job(project_id, source_file_id, quality, user, db)
+
+
+def start_processing_job(project_id, source_file_id, quality, user, db, upload_request=None):
+    """Shared job creation; link an integration reservation before commit/enqueue."""
     project = require_project_manager(db, user, project_id)
     if quality not in {"light", "balanced", "sharp", "high", "optimized"}:
         raise HTTPException(status_code=422, detail="Qualidade invalida.")
@@ -462,6 +467,8 @@ def create_processing_job(project_id: str, source_file_id: str | None = None, qu
     db.add(job)
     db.flush()
     audit(db, "processing_job_created", "processing_job", actor=user, target_id=job.id, organization_id=project.organization_id)
+    if upload_request is not None:
+        upload_request.job_id = job.id
     db.commit()
     enqueue_processing_job(job.id)
     db.refresh(job)
