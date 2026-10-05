@@ -56,6 +56,16 @@ def test_status_vira_vocabulario_do_banco():
     assert [lot.status for lot in lots] == ["available", "sold", "reserved"]
 
 
+def test_blocked_editor_status_survives_render_and_worker_roundtrip():
+    from pdf_to_map import _normalize_lot, build_html
+    item = _normalize_lot({'s': 3, 'pts': '0,0 10,0 10,10', 'nome': '01', 'quadra': 'A'})
+    assert item['s'] == 3
+    html = build_html('', 100, 100, [item])
+    assert '"s":3' in html
+    lot = extract_lots_from_info({'lots': [item]}, 'project', 'version')[0]
+    assert lot.status == 'blocked'
+
+
 def test_nome_quadra_e_area_sao_preservados():
     lot = extract_lots_from_info(_convert_output(1), "proj-1", "ver-1")[0]
     assert lot.name == "Q195-L001"

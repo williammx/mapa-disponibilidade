@@ -55,29 +55,24 @@ def test_login_funciona_em_banco_criado_so_pela_migration(banco_limpo, tmp_path)
     resultado = _run_alembic(banco_limpo, tmp_path)
     assert resultado.returncode == 0, resultado.stderr
 
-    os.environ["DATABASE_URL"] = banco_limpo
-    os.environ["SETUP_TOKEN"] = "token-de-teste-com-mais-de-16-chars"
-    os.environ["SESSION_COOKIE_SECURE"] = "false"
-    for module in [name for name in list(sys.modules)
-                   if name in {"api", "auth", "database", "models"}
-                   or name.startswith("app_v1")]:
-        sys.modules.pop(module, None)
-
-    from fastapi.testclient import TestClient
-    import api
-
-    with TestClient(api.app) as client:
-        setup = client.post("/api/auth/setup", json={
-            "token": "token-de-teste-com-mais-de-16-chars",
-            "email": "dono@exemplo.com",
-            "password": "senha-longa-de-teste",
-            "name": "Dono",
-        })
-        assert setup.status_code < 400, setup.text
-
-        login = client.post("/api/auth/login", json={
-            "email": "dono@exemplo.com",
-            "password": "senha-longa-de-teste",
-        })
-        assert login.status_code == 200, login.text
-        assert api.COOKIE_NAME in login.cookies
+    # Imports must use the fresh database without replacing the modules held by
+    # other tests' dependency overrides and SQLAlchemy fixture metadata.
+    script = '''
+from fastapi.testclient import TestClient
+import api
+with TestClient(api.app) as client:
+    setup = client.post('/api/auth/setup', json={
+        'token': 'token-de-teste-com-mais-de-16-chars',
+        'email': 'dono@exemplo.com', 'password': 'senha-longa-de-teste', 'name': 'Dono'})
+    assert setup.status_code < 400, setup.text
+    login = client.post('/api/auth/login', json={
+        'email': 'dono@exemplo.com', 'password': 'senha-longa-de-teste'})
+    assert login.status_code == 200, login.text
+    assert api.COOKIE_NAME in login.cookies
+'''
+    env = dict(os.environ, DATABASE_URL=banco_limpo,
+               SETUP_TOKEN="token-de-teste-com-mais-de-16-chars",
+               SESSION_COOKIE_SECURE="false", PYTHONPATH=ROOT)
+    result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=env,
+                            capture_output=True, text=True, timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr

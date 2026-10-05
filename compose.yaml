@@ -93,6 +93,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       SETUP_TOKEN: ${SETUP_TOKEN:-}
       PRIVATE_STORAGE_DIR: /data/storage
+      WEBHOOK_MASTER_KEY_FILE: /data/private/webhook-master.key
       # Obrigatorio depois que a imagem virou sem privilegio: o default do codigo
       # e /app/data/converter_jobs, e /app pertence ao root. As rotas legadas
       # /converter e /converter/jobs criam esse diretorio no primeiro upload e
@@ -151,6 +152,31 @@ services:
           # de ela alcancar o Postgres.
           memory: 2g
           cpus: "1.5"
+
+  # Entregas de eventos independentes do processamento de PDFs.
+  webhook-dispatcher:
+    build: .
+    container_name: mapa-webhook-dispatcher
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    command: ["python", "-m", "app_v1.webhook_dispatch"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mapa:mapa-local@db:5432/mapa}
+      PRIVATE_STORAGE_DIR: /data/storage
+      WEBHOOK_MASTER_KEY_FILE: /data/private/webhook-master.key
+    depends_on:
+      mapa-storage-init:
+        condition: service_completed_successfully
+      mapa-disponibilidade:
+        condition: service_healthy
+    volumes:
+      - mapa_project_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+          cpus: "0.5"
 
 volumes:
   mapa_postgres_data:

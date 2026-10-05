@@ -24,6 +24,7 @@ from database import Base, engine, get_db
 from models import AuditEvent, EditProposal, Membership, Organization, Project, ProjectVersion, Session, ShareLink, User, utcnow
 from app_v1.api import router as api_v1_router
 from app_v1.integrations import router as integrations_router, management_router as integration_keys_router
+from app_v1.webhooks import router as webhooks_router, management_router as webhook_management_router
 from app_v1.schemas import SharedEditProposalCreate
 
 # Em producao a documentacao interativa expunha o mapa completo de rotas, schemas
@@ -38,6 +39,8 @@ app = FastAPI(
 app.include_router(api_v1_router)
 app.include_router(integrations_router)
 app.include_router(integration_keys_router)
+app.include_router(webhooks_router)
+app.include_router(webhook_management_router)
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 CONVERTER_JOB_DIR = os.getenv("CONVERTER_JOB_DIR", os.path.join(HERE, "data", "converter_jobs"))
@@ -95,6 +98,9 @@ class ShareLinkPayload(BaseModel):
 class HtmlVersionPayload(BaseModel):
     html: str = Field(min_length=100, max_length=80_000_000)
     lot_count: int = Field(default=0, ge=0)
+    base_version_id: str | None = Field(default=None, max_length=36)
+    expected_revisions: dict[str, int] = Field(default_factory=dict)
+    lots: list[dict] | None = None
 
 
 class ConverterPublishPayload(BaseModel):
@@ -325,12 +331,22 @@ def app_spa_path(path: str):
     return spa_response()
 
 
-def project_editor_response(project: Project, version: ProjectVersion) -> HTMLResponse:
+def project_editor_response(project: Project, version: ProjectVersion, db: DbSession | None = None) -> HTMLResponse:
     if not os.path.isfile(version.map_html_path):
         raise HTTPException(status_code=404, detail="Arquivo do mapa nao encontrado.")
     with open(version.map_html_path, "r", encoding="utf-8") as map_file:
         html = map_file.read()
     controls = f"""<style>#project-save-bar{{position:fixed;z-index:30;top:12px;right:64px;display:flex;gap:8px;padding:7px;border:1px solid #3a4651;border-radius:8px;background:#161c22;box-shadow:0 12px 28px rgba(0,0,0,.28)}}#project-save-bar button,#project-save-bar a{{border:1px solid #43515d;border-radius:6px;background:#212b33;color:#eef5f1;padding:8px 10px;font:600 12px system-ui;text-decoration:none;cursor:pointer}}#project-save-bar button{{border-color:#36d889;background:#36d889;color:#06281a}}</style><div id=\"project-save-bar\"><a href=\"/app/projetos/{project.id}\">Voltar ao projeto</a><button id=\"save-project-map\">Salvar alteracoes</button></div><script>document.getElementById('save-project-map').onclick=async function(){{var button=this;button.disabled=true;button.textContent='Salvando...';try{{var payload=window.getMapaPayload();var rendered=await fetch('/render',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});if(!rendered.ok)throw new Error('Nao foi possivel preparar o mapa.');var saved=await fetch('/api/projects/{project.id}/versions/html',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{html:await rendered.text(),lot_count:Array.isArray(payload.lots)?payload.lots.length:0}})}});if(!saved.ok)throw new Error('Nao foi possivel salvar.');button.textContent='Alteracoes salvas';}}catch(error){{button.disabled=false;button.textContent='Salvar alteracoes';alert(error.message);}}}};</script>"""
+    if db is not None:
+        from app_v1.availability import render_live_html, reconcile_version
+        from models import IntegrationUnit
+        reconcile_version(db, project, version.id)
+        db.commit()
+        html = render_live_html(db, version, html)
+        revisions = {unit.id: unit.revision for unit in db.query(IntegrationUnit).filter_by(project_id=project.id).all()}
+        controls = controls.replace('lot_count:Array.isArray(payload.lots)?payload.lots.length:0',
+            'lot_count:Array.isArray(payload.lots)?payload.lots.length:0,lots:payload.lots,base_version_id:' +
+            json.dumps(version.id) + ',expected_revisions:' + json.dumps(revisions))
     return HTMLResponse(html.replace("</body>", controls + "</body>", 1))
 
 
@@ -342,7 +358,7 @@ def project_editor(project_id: str, user: User = Depends(current_user), db: DbSe
     version = latest_version(db, project.id)
     if not version:
         raise HTTPException(status_code=409, detail="Salve ou gere um mapa antes de abrir o editor.")
-    return project_editor_response(project, version)
+    return project_editor_response(project, version, db=db)
 
 
 @app.post("/api/auth/setup")
@@ -542,6 +558,11 @@ async def generate_project_map(project_id: str, arquivo: UploadFile = File(...),
         version.map_html_path = os.path.join(version_dir, "map.html")
         shutil.copy2(pdf_path, version.source_pdf_path)
         shutil.copy2(out_path, version.map_html_path)
+    from app_v1.worker import extract_lots_from_info
+    from app_v1.availability import reconcile_version
+    db.add_all(extract_lots_from_info(info, project.id, version.id))
+    db.flush()
+    reconcile_version(db, project, version.id, converted=True)
     audit(db, "project_map_generated", "project_version", actor=user, target_id=version.id, organization_id=project.organization_id)
     db.commit()
     return {"version": {"id": version.id, "lot_count": version.lot_count, "quality": version.quality}}
@@ -566,6 +587,13 @@ def save_editor_version(project_id: str, payload: HtmlVersionPayload, user: User
     version.map_html_path = os.path.join(version_dir, "map.html")
     with open(version.map_html_path, "w", encoding="utf-8") as fh:
         fh.write(payload.html)
+    try:
+        from app_v1.availability import persist_editor_lots
+        persist_editor_lots(db, project, version, payload.html, payload.base_version_id,
+                            payload.expected_revisions, payload.lots)
+    except Exception:
+        db.rollback()
+        raise
     audit(db, "project_editor_saved", "project_version", actor=user, target_id=version.id, organization_id=project.organization_id)
     db.commit()
     return {"version": {"id": version.id}}
@@ -647,11 +675,14 @@ window.addEventListener('DOMContentLoaded',function(){{
 """
 
 
-def shared_map_response(project: Project, version: ProjectVersion, allow_edit: bool = False, link: ShareLink | None = None):
+def shared_map_response(project: Project, version: ProjectVersion, allow_edit: bool = False, link: ShareLink | None = None, db: DbSession | None = None):
     if not os.path.isfile(version.map_html_path):
         raise HTTPException(status_code=404, detail="Arquivo do mapa nao encontrado.")
     with open(version.map_html_path, "r", encoding="utf-8") as map_file:
         html = map_file.read()
+    if db is not None:
+        from app_v1.availability import render_live_html
+        html = render_live_html(db, version, html)
     if allow_edit and link:
         html = html.replace("</head>", client_edit_injection(link) + "</head>", 1)
     else:
@@ -690,7 +721,7 @@ def public_project_map(slug: str, db: DbSession = Depends(get_db)):
         ShareLink.active.is_(True),
         ShareLink.access_mode == "public",
     ).order_by(ShareLink.created_at.desc()).first()
-    return shared_map_response(project, version, allow_edit=bool(link and link.allow_edit), link=link)
+    return shared_map_response(project, version, allow_edit=bool(link and link.allow_edit), link=link, db=db)
 
 
 @app.get("/mapas/{slug}")
@@ -740,7 +771,7 @@ def shared_project_map(token: str, request: Request, db: DbSession = Depends(get
     link.last_used_at = utcnow()
     link.access_count += 1
     db.commit()
-    return shared_map_response(project, version, allow_edit=link.allow_edit, link=link)
+    return shared_map_response(project, version, allow_edit=link.allow_edit, link=link, db=db)
 
 
 @app.post("/s/{token}")
@@ -769,7 +800,7 @@ def unlock_shared_project(token: str, request: Request, password: str = Form(...
     link.last_used_at = utcnow()
     link.access_count += 1
     db.commit()
-    response = shared_map_response(project, version, allow_edit=link.allow_edit, link=link)
+    response = shared_map_response(project, version, allow_edit=link.allow_edit, link=link, db=db)
     response.set_cookie(
         share_unlock_cookie_name(link),
         share_unlock_value(link),

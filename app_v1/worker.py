@@ -163,10 +163,10 @@ def recover_stalled_jobs_quietly(db, skip_job_id: str | None = None) -> list[str
         return []
 
 
-# O conversor devolve o status como indice (0/1/2) na mesma ordem de
+# O conversor devolve o status como indice (0/1/2/3) na mesma ordem de
 # pdf_to_map.STATUS_NAMES; o banco guarda o vocabulario em ingles de
 # app_v1/schemas.py:42.
-STATUS_BY_INDEX = ("available", "sold", "reserved")
+STATUS_BY_INDEX = ("available", "sold", "reserved", "blocked")
 
 
 def _parse_points(raw) -> list[list[float]]:
@@ -299,6 +299,8 @@ def run_processing_job(job_id: str) -> None:
                     % version.lot_count)
             db.add_all(lots)
             db.flush()
+            from .availability import reconcile_version
+            reconcile_version(db, project, version.id, converted=True)
             summary = validate_lots(lots)
             version.validation_summary = json.dumps(summary, ensure_ascii=False)
             job.project_version_id = version.id
@@ -316,6 +318,7 @@ def run_processing_job(job_id: str) -> None:
             ))
             db.commit()
     except Exception as exc:
+        db.rollback()
         job = db.get(ProcessingJob, job_id)
         if job:
             job.status = "failed"

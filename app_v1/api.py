@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
@@ -426,7 +427,19 @@ def download_file(file_id: str, user: User = Depends(current_user), db: DbSessio
         raise HTTPException(status_code=404, detail="Arquivo nao encontrado.")
     if not user_can_access_org(db, user, asset.organization_id):
         raise HTTPException(status_code=404, detail="Arquivo nao encontrado.")
-    return FileResponse(storage_path(asset.storage_key), media_type=asset.content_type or "application/octet-stream", filename=asset.original_name)
+    path = storage_path(asset.storage_key)
+    if asset.project_version_id and asset.content_type == "text/html":
+        version = db.get(ProjectVersion, asset.project_version_id)
+        project = db.get(Project, asset.project_id) if asset.project_id else None
+        if not version or not project or version.project_id != project.id or project.organization_id != asset.organization_id:
+            raise HTTPException(status_code=404, detail="Arquivo nao encontrado.")
+        if path.resolve() == Path(version.map_html_path).resolve():
+            from .availability import render_live_html
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse(render_live_html(db, version, path.read_text(encoding="utf-8")),
+                headers={"Content-Disposition": 'attachment; filename="map.html"', "Cache-Control": "no-store",
+                         "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"})
+    return FileResponse(path, media_type=asset.content_type or "application/octet-stream", filename=asset.original_name)
 
 
 @router.post("/projects/{project_id}/processing-jobs", status_code=202)
@@ -655,25 +668,6 @@ def list_lots(version_id: str, q: str | None = None, status_filter: str | None =
     return {"lots": [lot_dict(row) for row in query.order_by(Lot.sort_order).all()]}
 
 
-@router.patch("/lots/{lot_id}")
-def patch_lot(lot_id: str, payload: LotPatch, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
-    lot = db.get(Lot, lot_id)
-    if not lot:
-        raise HTTPException(status_code=404, detail="Lote nao encontrado.")
-    project = require_project_manager(db, user, lot.project_id)
-    changes = payload.model_dump(exclude_unset=True)
-    if "geometry" in changes:
-        lot.geometry_json = json.dumps(changes.pop("geometry"), ensure_ascii=False)
-    if "properties" in changes:
-        lot.properties_json = json.dumps(changes.pop("properties"), ensure_ascii=False)
-    for key, value in changes.items():
-        setattr(lot, key, value)
-    audit(db, "lot_updated", "lot", actor=user, target_id=lot.id, organization_id=project.organization_id, details=json.dumps(payload.model_dump(exclude_unset=True), ensure_ascii=False))
-    db.commit()
-    db.refresh(lot)
-    return {"lot": lot_dict(lot)}
-
-
 @router.patch("/lots/batch")
 def patch_lots_batch(payload: LotBatchPatch, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
     lots = db.query(Lot).filter(Lot.id.in_(payload.lot_ids)).all()
@@ -685,7 +679,11 @@ def patch_lots_batch(payload: LotBatchPatch, user: User = Depends(current_user),
     changes = payload.changes.model_dump(exclude_unset=True)
     geometry = changes.pop("geometry", None)
     properties = changes.pop("properties", None)
+    availability_status = changes.pop("status", None)
     for lot in lots:
+        if availability_status is not None:
+            from .availability import set_lot_status
+            set_lot_status(db, project, lot, availability_status)
         for key, value in changes.items():
             setattr(lot, key, value)
         if geometry is not None:
@@ -695,6 +693,28 @@ def patch_lots_batch(payload: LotBatchPatch, user: User = Depends(current_user),
     audit(db, "lots_batch_updated", "lot", actor=user, organization_id=project.organization_id, details=json.dumps({"count": len(lots), "changes": payload.changes.model_dump(exclude_unset=True)}, ensure_ascii=False))
     db.commit()
     return {"updated": len(lots)}
+
+
+@router.patch("/lots/{lot_id}")
+def patch_lot(lot_id: str, payload: LotPatch, user: User = Depends(current_user), db: DbSession = Depends(get_db)):
+    lot = db.get(Lot, lot_id)
+    if not lot:
+        raise HTTPException(status_code=404, detail="Lote nao encontrado.")
+    project = require_project_manager(db, user, lot.project_id)
+    changes = payload.model_dump(exclude_unset=True)
+    if "status" in changes:
+        from .availability import set_lot_status
+        set_lot_status(db, project, lot, changes.pop("status"))
+    if "geometry" in changes:
+        lot.geometry_json = json.dumps(changes.pop("geometry"), ensure_ascii=False)
+    if "properties" in changes:
+        lot.properties_json = json.dumps(changes.pop("properties"), ensure_ascii=False)
+    for key, value in changes.items():
+        setattr(lot, key, value)
+    audit(db, "lot_updated", "lot", actor=user, target_id=lot.id, organization_id=project.organization_id, details=json.dumps(payload.model_dump(exclude_unset=True), ensure_ascii=False))
+    db.commit()
+    db.refresh(lot)
+    return {"lot": lot_dict(lot)}
 
 
 @router.get("/projects/{project_id}/share-links")

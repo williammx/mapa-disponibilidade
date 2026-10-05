@@ -75,6 +75,12 @@ for attempt in $(seq 1 45); do
       exit 1
     fi
 
+    if [ "$(docker inspect -f '{{.State.Running}}' mapa-webhook-dispatcher 2>/dev/null)" != "true" ]; then
+      echo "FALHA: o dispatcher de webhooks nao esta rodando."
+      docker compose logs --tail=80 webhook-dispatcher
+      exit 1
+    fi
+
     # Confere que o codigo que subiu e o que foi enviado, e nao uma imagem
     # antiga reaproveitada pelo cache do Docker.
     ESPERADO="$(md5sum "$APP_DIR/api.py" | cut -d' ' -f1)"

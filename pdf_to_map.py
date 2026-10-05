@@ -22,9 +22,9 @@ except ImportError:  # A extracao vetorial continua disponivel sem OpenCV.
     cv2 = None
     np = None
 
-STATUS_NAMES = ["disponivel", "vendido", "reservado"]
-STATUS_FILL = [(38, 208, 124), (110, 109, 103), (224, 97, 59)]
-STATUS_HEX = ["#26d07c", "#6e6d67", "#e0613b"]
+STATUS_NAMES = ["disponivel", "vendido", "reservado", "bloqueado"]
+STATUS_FILL = [(38, 208, 124), (110, 109, 103), (224, 97, 59), (124, 131, 139)]
+STATUS_HEX = ["#26d07c", "#6e6d67", "#e0613b", "#7c838b"]
 DEFAULT_OPACITY = 0.70
 DEFAULT_STROKE_WIDTH = 0.60
 DEFAULT_LABEL_MODE = "auto"
@@ -1707,7 +1707,7 @@ def build_html(b64, W, H, data, title="Mapa NexoLote", img_mime="image/jpeg",
     opacity = _clamp_float(opacity, DEFAULT_OPACITY, 0.20, 1.0)
     stroke_width = _clamp_float(stroke_width, DEFAULT_STROKE_WIDTH, 0.20, 2.5)
     label_mode = _clean_label_mode(label_mode)
-    n = [0, 0, 0]
+    n = [0] * len(STATUS_NAMES)
     for item in data:
         n[item["s"]] += 1
     return (HTML_TEMPLATE.replace("__W__", str(W)).replace("__H__", str(H)).replace("__IMG__", b64)
@@ -1716,7 +1716,7 @@ def build_html(b64, W, H, data, title="Mapa NexoLote", img_mime="image/jpeg",
             .replace("__STROKE__", ("%.2f" % stroke_width)).replace("__LABEL_MODE__", json.dumps(label_mode))
             .replace("__DATA__", json.dumps(data, separators=(",", ":"))).replace("__TITLE__", title)
             .replace("__NLOTS__", str(len(data))).replace("__N0__", str(n[0]))
-            .replace("__N1__", str(n[1])).replace("__N2__", str(n[2]))
+            .replace("__N1__", str(n[1])).replace("__N2__", str(n[2])).replace("__N3__", str(n[3]))
             # Marca de quando este HTML foi gerado (epoch ms). O editor so oferece
             # restaurar o rascunho local se ele for mais novo que este numero.
             .replace("__GENERATED_AT__", str(int(time.time() * 1000))))
@@ -1801,7 +1801,7 @@ def convert(pdf_path, out_html, page_index=0, max_px=None, rotate="auto",
     if geojson_out:
         with open(geojson_out, "w", encoding="utf-8") as fh:
             json.dump({"type": "FeatureCollection", "features": geo}, fh)
-    n = [0, 0, 0]
+    n = [0] * len(STATUS_NAMES)
     for item in data: n[item["s"]] += 1
     # "data" carrega os lotes em si. Sem essa chave o worker da fila grava zero
     # lotes no banco em toda conversao (app_v1/worker.py:extract_lots_from_info)
@@ -1811,7 +1811,7 @@ def convert(pdf_path, out_html, page_index=0, max_px=None, rotate="auto",
             "alinhamento": align_info,
             "imagem": {"quality": quality_info["name"], "mime": img_mime, "max_px": effective_max_px},
             "estilo": {"opacity": opacity, "stroke_width": stroke_width, "label_mode": label_mode},
-            "status": {STATUS_NAMES[i]: n[i] for i in range(3)},
+            "status": {STATUS_NAMES[i]: n[i] for i in range(len(STATUS_NAMES))},
             "metadados": {"com_texto": sum(1 for item in data if item.get("extraido"))},
             "saida": out_html}
 

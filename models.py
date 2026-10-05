@@ -212,6 +212,55 @@ class IntegrationUploadRequest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
+class IntegrationUnit(Base):
+    __tablename__ = "integration_units"
+    __table_args__ = (UniqueConstraint("project_id", "external_system", "external_unit_id", name="uq_unit_external"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    external_system: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    external_unit_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    block: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="available", nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    mapping_state: Mapped[str] = mapped_column(String(32), default="mapped", nullable=False)
+    lot_id: Mapped[str | None] = mapped_column(ForeignKey("lots.id", ondelete="SET NULL"), nullable=True, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class IntegrationUnitLot(Base):
+    __tablename__ = "integration_unit_lots"
+    __table_args__ = (UniqueConstraint("unit_id", "project_version_id", name="uq_unit_version"),)
+    lot_id: Mapped[str] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"), primary_key=True)
+    unit_id: Mapped[str] = mapped_column(ForeignKey("integration_units.id", ondelete="CASCADE"), nullable=False, index=True)
+    project_version_id: Mapped[str] = mapped_column(ForeignKey("project_versions.id", ondelete="CASCADE"), nullable=False)
+
+
+class IntegrationEvent(Base):
+    __tablename__ = "integration_events"
+    __table_args__ = {"sqlite_autoincrement": True}
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class IntegrationAvailabilityRequest(Base):
+    __tablename__ = "integration_availability_requests"
+    __table_args__ = (UniqueConstraint("project_id", "external_system", "event_id", name="uq_availability_request"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    external_system: Mapped[str] = mapped_column(String(120), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

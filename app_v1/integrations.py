@@ -18,13 +18,14 @@ from .serialization import dt
 
 router = APIRouter(prefix="/api/integrations/v1", tags=["integrations"])
 management_router = APIRouter(prefix="/api/v1/integration-api-keys", tags=["integration key management"])
-SCOPES = frozenset({"capabilities:read", "jobs:write", "jobs:read", "jobs:cancel", "results:read", "projects:read", "projects:write", "publications:write", "shares:read", "shares:write"})
+SCOPES = frozenset({"capabilities:read", "jobs:write", "jobs:read", "jobs:cancel", "results:read", "projects:read", "projects:write", "publications:write", "shares:read", "shares:write", "units:read", "units:write", "events:read", "webhooks:write"})
 
 
 @router.get("/openapi.json", include_in_schema=False)
 def integration_openapi():
     from fastapi.openapi.utils import get_openapi
-    schema = get_openapi(title="NexoLote Integration API", version="1.0.0", routes=router.routes,
+    from .webhooks import router as webhook_router
+    schema = get_openapi(title="NexoLote Integration API", version="1.1.0", routes=[*router.routes, *webhook_router.routes],
         description="Generate, publish and share maps using organization-scoped Bearer API keys. Geometry uses PDF-local coordinates.")
     schema.setdefault("components", {}).setdefault("securitySchemes", {})["IntegrationBearer"] = {
         "type": "http", "scheme": "bearer", "description": "API key created in /app/integracoes. Never use a session token."}
@@ -204,6 +205,96 @@ def update_project(project_id: str, payload: ExternalProjectUpdate,
     authorized_project(db, key, project_id)
     return existing.update_project(project_id, ProjectUpdate(**payload.model_dump(exclude_unset=True)),
                                    db.get(User, key.created_by_user_id), db)
+
+
+class ExternalUnitReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    external_system: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
+    external_unit_id: str = Field(min_length=1, max_length=160)
+
+
+class ExternalUnitBind(ExternalUnitReference):
+    lot_id: str = Field(min_length=1, max_length=36)
+
+
+class ExternalAvailability(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    status: Literal["available", "sold", "reserved", "blocked"]
+    expected_revision: int = Field(ge=0, strict=True)
+    event_id: str = Field(min_length=1, max_length=160)
+    source: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.get("/projects/{project_id}/units")
+def list_units(project_id: str, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+               key: IntegrationApiKey = Depends(require_api_key("units:read")), db: DbSession = Depends(get_db)):
+    from models import IntegrationUnit
+    from .availability import unit_dict
+    authorized_project(db, key, project_id)
+    query = db.query(IntegrationUnit).filter_by(project_id=project_id, organization_id=key.organization_id)
+    total = query.count()
+    rows = query.order_by(IntegrationUnit.created_at, IntegrationUnit.id).offset(offset).limit(limit).all()
+    return {"units": [unit_dict(row) for row in rows], "total": total, "limit": limit, "offset": offset,
+            "next_offset": offset + len(rows) if offset + len(rows) < total else None}
+
+
+@router.post("/projects/{project_id}/units/bind")
+def bind_unit(project_id: str, payload: ExternalUnitBind,
+              key: IntegrationApiKey = Depends(require_api_key("units:write")), db: DbSession = Depends(get_db)):
+    from .availability import bind, unit_dict
+    project = authorized_project(db, key, project_id)
+    try:
+        unit = bind(db, project, payload.external_system, payload.external_unit_id, payload.lot_id)
+        result = {"unit": unit_dict(unit)}
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.put("/projects/{project_id}/units/{unit_id}/external-reference")
+def set_unit_reference(project_id: str, unit_id: str, payload: ExternalUnitReference,
+                       key: IntegrationApiKey = Depends(require_api_key("units:write")), db: DbSession = Depends(get_db)):
+    from .availability import lock_project, get_unit, reference, unit_dict
+    project = authorized_project(db, key, project_id)
+    try:
+        lock_project(db, project.id)
+        unit = reference(db, get_unit(db, project, unit_id), payload.external_system, payload.external_unit_id)
+        result = {"unit": unit_dict(unit)}
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.patch("/projects/{project_id}/units/{unit_id}/availability")
+def update_availability(project_id: str, unit_id: str, payload: ExternalAvailability,
+                        key: IntegrationApiKey = Depends(require_api_key("units:write")), db: DbSession = Depends(get_db)):
+    from .availability import change
+    project = authorized_project(db, key, project_id)
+    try:
+        result = change(db, project, unit_id, **payload.model_dump())
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.get("/projects/{project_id}/events")
+def list_events(project_id: str, after: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+                key: IntegrationApiKey = Depends(require_api_key("events:read")), db: DbSession = Depends(get_db)):
+    from models import IntegrationEvent
+    from .availability import event_dict
+    authorized_project(db, key, project_id)
+    rows = db.query(IntegrationEvent).filter(IntegrationEvent.project_id == project_id,
+        IntegrationEvent.organization_id == key.organization_id, IntegrationEvent.id > after).order_by(
+        IntegrationEvent.id).limit(limit + 1).all()
+    return {"events": [event_dict(row) for row in rows[:limit]],
+            "next_cursor": rows[min(len(rows), limit) - 1].id if rows else after, "has_more": len(rows) > limit}
 
 
 class ExternalPublish(BaseModel):
@@ -496,7 +587,10 @@ def job_result(job_id: str, result_format: str, limit: int = Query(100, ge=1, le
         root = storage.storage_path("projects/" + job.project_id).resolve()
         if root not in path.parents or not path.is_file():
             raise HTTPException(404, "Result artifact not found.")
-        return FileResponse(path, media_type="text/html", filename="map.html",
-                            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        from fastapi.responses import HTMLResponse
+        from .availability import render_live_html
+        return HTMLResponse(render_live_html(db, version, path.read_text(encoding="utf-8")),
+                            headers={"Content-Disposition": 'attachment; filename="map.html"',
+                                     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                                      "Content-Security-Policy": "sandbox"})
     raise HTTPException(422, "Use html, lots, or geojson with page_local=true.")
