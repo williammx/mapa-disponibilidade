@@ -7,12 +7,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WebhookDeploymentTests(unittest.TestCase):
     def test_app_and_dispatcher_share_private_persistent_signing_key(self):
-        import yaml
-        services = yaml.safe_load((ROOT / 'compose.yaml').read_text(encoding='utf-8'))['services']
+        compose = (ROOT / 'compose.yaml').read_text(encoding='utf-8')
         for name in ('mapa-disponibilidade', 'webhook-dispatcher'):
-            self.assertEqual(services[name]['environment'].get('WEBHOOK_MASTER_KEY_FILE'),
-                             '/data/private/webhook-master.key')
-            self.assertIn('mapa_project_data:/data', services[name]['volumes'])
+            match = re.search(r'^  ' + re.escape(name) + r':\n(.*?)(?=^  [\w-]+:|^volumes:)',
+                              compose, re.M | re.S)
+            self.assertIsNotNone(match)
+            block = match.group(1)
+            self.assertRegex(block, re.compile(r'^      WEBHOOK_MASTER_KEY_FILE: /data/private/webhook-master\.key$', re.M))
+            self.assertIn('mapa_project_data:/data', block)
 
     def test_release_checks_dispatcher_before_claiming_success(self):
         release = (ROOT / 'deploy' / 'remote-release.sh').read_text(encoding='utf-8')
