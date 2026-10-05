@@ -1,7 +1,7 @@
 # NexoLote — API de integrações v1
 
 ## Estado
-Implementada no código local. Exige migration Alembic antes do uso. Não confundir disponibilidade local com deploy em produção.
+Disponível em produção em `https://map.eterhub.com.br/api/integrations/v1`. A implantação aplica as migrations Alembic com backup. Gestão de chaves em `/app/integracoes`, exclusiva de administradores da plataforma.
 
 ## Autenticação
 Envie `Authorization: Bearer <chave>` em todas as chamadas externas. Nunca inclua a chave em URL, frontend público ou repositório. Cada chave é limitada a uma organização e opcionalmente a um projeto; o servidor guarda somente seu hash. O segredo é entregue uma única vez.
@@ -39,7 +39,7 @@ curl --fail-with-body -H "Authorization: Bearer $NEXOLOTE_API_KEY" "$BASE/api/in
 - Resultados antes do término retornam 409.
 - 401: chave ausente/inválida/expirada/revogada; 403: escopo insuficiente; 404: recurso inexistente ou fora do limite da chave; 413: arquivo acima do teto; 422: entrada inválida.
 - JSON de lotes contém geometria em coordenadas locais da página PDF, não latitude/longitude. GeoJSON georreferenciado não está disponível.
-- O HTML é artefato para download com CSP sandbox. Não é link publicado nem convite de cliente; publicação segue o fluxo do portal.
+- O HTML é artefato para download com CSP sandbox. Não é link publicado nem convite de cliente; use `/projects/{id}/publish` e os endpoints de compartilhamento para entregar o mapa somente leitura.
 - Esta versão inclui criação externa de projetos, idempotência e limite persistido por chave. Não inclui webhooks nem SDK: use HTTP e polling.
 
 ## Implantação
