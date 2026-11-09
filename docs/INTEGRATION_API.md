@@ -12,7 +12,13 @@ Um administrador autenticado pelo portal cria a chave em `POST /api/v1/integrati
 {"name":"ERP","organization_id":"ID_ORGANIZACAO","project_id":"ID_PROJETO","scopes":["capabilities:read","jobs:write","jobs:read","jobs:cancel","results:read"]}
 ```
 
-Validade padrão 90 dias; `expires_at` opcional em ISO 8601, no máximo 365 dias. Liste metadados em `GET /api/v1/integration-api-keys?organization_id=...`; revogue em `DELETE /api/v1/integration-api-keys/{key_id}`. A gestão usa sessão administrativa, não a chave externa.
+Por padrão, novas chaves não têm vencimento: omita `expires_at` ou envie `null`. Continuam válidas até revogação, desde que organização e administrador responsável permaneçam ativos e autorizados. Uma expiração explícita em ISO 8601 continua opcional, futura e limitada a 365 dias. Liste metadados em `GET /api/v1/integration-api-keys?organization_id=...`; revogue em `DELETE /api/v1/integration-api-keys/{key_id}`. A gestão usa sessão administrativa, não a chave externa. A migration não remove prazos antigos nem reativa chaves expiradas/revogadas automaticamente.
+
+### Consultar a própria chave
+
+`GET /api/integrations/v1/me`, com o Bearer da integração, retorna `{api_key}` com `id`, `name`, `organization_id`, `project_id`, `scopes`, `expires_at`, `revoked_at` e `created_at`. Não exige escopo adicional e não retorna segredo ou hash. Resposta usa `Cache-Control: no-store`. `expires_at: null` significa **sem vencimento**: o consumidor não deve exigir data manual nem emitir aviso de expiração nesse caso.
+
+Em `/capabilities`, `scopes` continua sendo o catálogo geral de permissões da API; `granted_scopes` informa as permissões realmente concedidas à chave autenticada e `expires_at` informa seu vencimento opcional. A introspecção também obedece autenticação, revogação, suspensão e rate limit. O contrato OpenAPI é versão `1.2.0`.
 
 ## Fluxo
 1. Crie o cliente no portal e a chave em `/app/integracoes`. Crie o projeto via `POST /api/integrations/v1/projects` com `name`, `slug` e `description` opcional, ou use um projeto existente.
@@ -43,7 +49,7 @@ curl --fail-with-body -H "Authorization: Bearer $NEXOLOTE_API_KEY" "$BASE/api/in
 - Esta versão inclui criação externa de projetos, idempotência, disponibilidade comercial, eventos e webhooks. Não inclui SDK nem adaptador de fornecedor específico.
 
 ## Implantação
-Aplicar `alembic upgrade head` com backup antes de ativar app, worker e `webhook-dispatcher`. Migrations até `20261005_0006_integration_webhooks.py`. Testes de produção usam somente chaves temporárias revogadas ao terminar, sem registrar seus segredos.
+Aplicar `alembic upgrade head` com backup antes de ativar app, worker e `webhook-dispatcher`. Migrations até `20261109_0007_optional_key_expiry.py`. Testes de produção usam somente chaves temporárias revogadas ao terminar, sem registrar seus segredos. No downgrade da migration 0007, chaves sem vencimento passam a vencer na data de sua criação (falha fechada), pois a versão antiga não suporta nulos; um rollback requer planejar reemissão/reautorização dessas chaves.
 
 Aplicação e dispatcher compartilham `WEBHOOK_MASTER_KEY_FILE=/data/private/webhook-master.key` no volume persistente `mapa_project_data`. O arquivo é privado e não deve ser apagado, substituído ou incluído em repositórios. O backup operacional precisa incluir esse arquivo protegido além do banco; perder a chave muda os segredos derivados das assinaturas.
 

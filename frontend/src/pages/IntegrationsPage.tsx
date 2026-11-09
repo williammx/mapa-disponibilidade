@@ -159,7 +159,7 @@ function CreateKeyForm({ organizationId, onCancel, onCreated }: { organizationId
       <fieldset disabled={busy} className="space-y-5">
         <div className="grid gap-4 md:grid-cols-2">
           <label><span className="mb-2 block text-sm text-slate-300">Nome da chave</span><input name="name" required maxLength={160} className={field} placeholder="Ex.: CRM comercial" /></label>
-          <label><span className="mb-2 block text-sm text-slate-300">Expiracao (opcional)</span><input name="expiry" type="datetime-local" className={field} /><span className="mt-2 block text-xs text-slate-400">Horario local. Em branco: validade padrao do servidor (90 dias).</span></label>
+          <label><span className="mb-2 block text-sm text-slate-300">Expiracao (opcional)</span><input name="expiry" type="datetime-local" className={field} /><span className="mt-2 block text-xs text-slate-400">Horario local. Em branco: sem vencimento, valida ate ser revogada.</span></label>
         </div>
         {projects.loading ? <LoadingBlock label="Carregando projetos..." rows={1} /> : projects.error ? <ErrorBlock message={projects.error} onRetry={projects.reload} /> : (
           <label className="block"><span className="mb-2 block text-sm text-slate-300">Projeto (opcional)</span><select aria-label="Projeto (opcional)" name="project" className={field}><option value="">Todos os projetos da organizacao</option>{projects.data?.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>

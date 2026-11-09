@@ -171,13 +171,18 @@ def event(ctx, **kw):
     return row
 
 
-def test_durable_delivery_exact_signature_origin_and_dedupe(ctx):
+@pytest.mark.parametrize('nonexpiring', [False, True])
+def test_durable_delivery_exact_signature_origin_and_dedupe(ctx, nonexpiring):
     import hashlib
     import hmac
 
     from app_v1 import webhook_dispatch as dispatch
     from app_v1.webhook_models import WebhookDelivery
 
+    if nonexpiring:
+        _, db, key, *_ = ctx
+        key.expires_at = None
+        db.commit()
     created = subscribe(ctx)
     row = event(ctx)
     _, db, *_ = ctx

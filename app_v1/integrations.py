@@ -25,7 +25,7 @@ SCOPES = frozenset({"capabilities:read", "jobs:write", "jobs:read", "jobs:cancel
 def integration_openapi():
     from fastapi.openapi.utils import get_openapi
     from .webhooks import router as webhook_router
-    schema = get_openapi(title="NexoLote Integration API", version="1.1.0", routes=[*router.routes, *webhook_router.routes],
+    schema = get_openapi(title="NexoLote Integration API", version="1.2.0", routes=[*router.routes, *webhook_router.routes],
         description="Generate, publish and share maps using organization-scoped Bearer API keys. Geometry uses PDF-local coordinates.")
     schema.setdefault("components", {}).setdefault("securitySchemes", {})["IntegrationBearer"] = {
         "type": "http", "scheme": "bearer", "description": "API key created in /app/integracoes. Never use a session token."}
@@ -83,10 +83,10 @@ def create_api_key(payload: ApiKeyCreate, response: Response,
             raise HTTPException(404, "Project not found.")
     if not payload.name.strip() or not set(payload.scopes).issubset(SCOPES):
         raise HTTPException(422, "Invalid name or scopes.")
-    expires = payload.expires_at or utcnow() + timedelta(days=90)
-    if expires.tzinfo:
+    expires = payload.expires_at
+    if expires is not None and expires.tzinfo:
         expires = expires.astimezone(timezone.utc).replace(tzinfo=None)
-    if not utcnow() < expires <= utcnow() + timedelta(days=365):
+    if expires is not None and not utcnow() < expires <= utcnow() + timedelta(days=365):
         raise HTTPException(422, "Expiry must be in the future and within 365 days.")
     raw = "nlk_" + secrets.token_urlsafe(48)
     key = IntegrationApiKey(name=payload.name.strip(), organization_id=org.id, project_id=payload.project_id,
@@ -147,24 +147,31 @@ def enforce_rate_limit(db: DbSession, key: IntegrationApiKey) -> None:
         raise HTTPException(429, "API key rate limit exceeded.", headers={"Retry-After": str(retry_after)})
 
 
-def require_api_key(scope: str):
+def require_api_key(scope: str | None):
     """Bearer-only: never consult or override the existing session dependency."""
     def authenticate(request: Request, db: DbSession = Depends(get_db)) -> IntegrationApiKey:
         parts = request.headers.get("Authorization", "").split()
         if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].startswith("nlk_") or len(parts[1]) > 256:
             raise HTTPException(401, "API key required.", headers={"WWW-Authenticate": "Bearer"})
         key = db.query(IntegrationApiKey).filter(IntegrationApiKey.token_hash == hash_token(parts[1])).first()
-        if not key or key.revoked_at or key.expires_at <= utcnow():
+        if not key or key.revoked_at or (key.expires_at is not None and key.expires_at <= utcnow()):
             raise HTTPException(401, "Invalid API key.", headers={"WWW-Authenticate": "Bearer"})
         org = db.get(Organization, key.organization_id)
         owner = db.get(User, key.created_by_user_id)
         if not org or not org.active or not owner or not owner.active or owner.platform_role != "platform_admin":
             raise HTTPException(401, "Invalid API key.")
-        if scope not in json.loads(key.scopes_json):
+        if scope is not None and scope not in json.loads(key.scopes_json):
             raise HTTPException(403, "Insufficient API key scope.")
         enforce_rate_limit(db, key)
         return key
     return authenticate
+
+
+@router.get("/me")
+def integration_identity(response: Response, key: IntegrationApiKey = Depends(require_api_key(None))):
+    """Read only this authenticated key's grants and deadline, never its secret."""
+    response.headers["Cache-Control"] = "no-store"
+    return {"api_key": key_metadata(key)}
 
 
 @router.get("/projects")
@@ -372,6 +379,7 @@ def revoke_share(share_link_id: str, key: IntegrationApiKey = Depends(require_ap
 def capabilities(key: IntegrationApiKey = Depends(require_api_key("capabilities:read"))):
     import os
     return {"api_version": "v1", "scopes": sorted(SCOPES), "organization_id": key.organization_id,
+            "granted_scopes": sorted(json.loads(key.scopes_json)), "expires_at": dt(key.expires_at),
             "project_id": key.project_id, "input_formats": ["application/pdf"],
             "max_upload_bytes": int(os.getenv("MAX_UPLOAD_BYTES", str(80 * 1024 * 1024))),
             "qualities": ["light", "balanced", "sharp", "high", "optimized"],

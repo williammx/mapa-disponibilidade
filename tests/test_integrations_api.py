@@ -75,6 +75,37 @@ def bearer(created):
     return {"Authorization": "Bearer " + created["key"]}
 
 
+def test_default_key_has_no_expiry_but_can_be_revoked(ctx):
+    from models import IntegrationApiKey
+    client, db, _, _, _, _ = ctx
+    created = mint(ctx, ["capabilities:read"])
+    assert created['api_key']['expires_at'] is None
+    row = db.get(IntegrationApiKey, created['api_key']['id'])
+    assert row.expires_at is None
+    assert client.get(PREFIX + '/capabilities', headers=bearer(created)).status_code == 200
+    client.cookies.set(COOKIE_NAME, 'test-cookie')
+    assert client.delete(MANAGEMENT + '/' + row.id).status_code == 204
+    client.cookies.clear()
+    assert client.get(PREFIX + '/capabilities', headers=bearer(created)).status_code == 401
+
+
+def test_key_introspection_exposes_actual_grants_without_extra_scope(ctx):
+    client, db, _, org, _, _ = ctx
+    created = mint(ctx, ['jobs:read'])
+    response = client.get(PREFIX + '/me', headers=bearer(created))
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'no-store'
+    info = response.json()['api_key']
+    assert info['scopes'] == ['jobs:read'] and info['expires_at'] is None
+    assert info['organization_id'] == org.id
+    assert created['key'] not in response.text and 'token_hash' not in response.text
+    assert client.get(PREFIX + '/me').status_code == 401
+    capabilities_key = mint(ctx, ['capabilities:read'])
+    caps = client.get(PREFIX + '/capabilities', headers=bearer(capabilities_key)).json()
+    assert caps['granted_scopes'] == ['capabilities:read']
+    assert caps['expires_at'] is None
+
+
 def test_external_projects_are_org_scoped_and_strict(ctx):
     client, db, _, org, project, foreign = ctx
     created = mint(ctx, ["projects:read", "projects:write"])
@@ -537,6 +568,47 @@ def test_worker_never_restarts_nonqueued_jobs(ctx, monkeypatch, status):
     worker.run_processing_job(job.id)
     db.refresh(job)
     assert job.status == status
+
+
+def test_nonexpiring_key_migration_preserves_old_keys(tmp_path, monkeypatch):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect
+    from models import IntegrationApiKey
+    url = 'sqlite:///' + str(tmp_path / 'optional-expiry.db')
+    monkeypatch.setenv('DATABASE_URL', url)
+    config = Config()
+    config.set_main_option('script_location', 'alembic')
+    command.upgrade(config, '20261005_0006')
+    engine = create_engine(url)
+    factory = sessionmaker(bind=engine)
+    expiry, revoked = utcnow() + timedelta(days=30), utcnow()
+    with factory() as db:
+        admin = User(name='Admin', email='migration-expiry@example.test', password_hash='unused', platform_role='platform_admin')
+        org = Organization(name='Migration', slug='migration-expiry')
+        db.add_all([admin, org])
+        db.flush()
+        row = IntegrationApiKey(name='Existing revoked', organization_id=org.id,
+            created_by_user_id=admin.id, token_hash='a' * 64, scopes_json='[]',
+            expires_at=expiry, revoked_at=revoked)
+        db.add(row)
+        db.commit()
+        ident, org_id, admin_id = row.id, org.id, admin.id
+    command.upgrade(config, 'head')
+    assert next(c for c in inspect(engine).get_columns('integration_api_keys') if c['name'] == 'expires_at')['nullable']
+    with factory() as db:
+        row = db.get(IntegrationApiKey, ident)
+        assert row.expires_at == expiry and row.revoked_at == revoked
+        db.add(IntegrationApiKey(name='Permanent', organization_id=org_id,
+            created_by_user_id=admin_id, token_hash='b' * 64, scopes_json='[]', expires_at=None))
+        db.commit()
+    command.downgrade(config, '20261005_0006')
+    assert not next(c for c in inspect(engine).get_columns('integration_api_keys') if c['name'] == 'expires_at')['nullable']
+    command.upgrade(config, 'head')
+    with factory() as db:
+        row = db.get(IntegrationApiKey, ident)
+        assert row.expires_at == expiry and row.revoked_at == revoked
+    engine.dispose()
 
 
 def test_api_key_migration_upgrade_and_downgrade(tmp_path, monkeypatch):

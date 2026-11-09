@@ -192,7 +192,7 @@ class IntegrationApiKey(Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rate_window_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rate_request_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)

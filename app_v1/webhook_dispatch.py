@@ -42,7 +42,7 @@ def owner_valid(db, subscription):
         if (
             not key
             or key.revoked_at
-            or key.expires_at <= utcnow()
+            or (key.expires_at is not None and key.expires_at <= utcnow())
             or key.organization_id != org.id
             or (key.project_id and key.project_id != project.id)
             or "webhooks:write" not in json.loads(key.scopes_json)
